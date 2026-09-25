@@ -88,6 +88,11 @@ static void test_message_types() {
   assert(classify_ws_message("{\"type\":\"request_follow_up\"}") ==
          WsMessageType::REQUEST_FOLLOW_UP);
   assert(classify_ws_message("{\"type\":\"error\"}") == WsMessageType::ERROR);
+  assert(classify_ws_message("{\"type\":\"timer_start\"}") == WsMessageType::TIMER_START);
+  assert(classify_ws_message("{\"type\":\"timer_cancel\"}") == WsMessageType::TIMER_CANCEL);
+  assert(classify_ws_message("{\"type\":\"timer_list\"}") == WsMessageType::TIMER_LIST);
+  assert(classify_ws_message("{ \"type\" : \"timer_start\" }") == WsMessageType::TIMER_START);
+  assert(classify_ws_message("{\"type\":\"timer_list_extra\"}") == WsMessageType::UNKNOWN);
   assert(classify_ws_message("{\"type\":\"invalid}") == WsMessageType::UNKNOWN);
 }
 

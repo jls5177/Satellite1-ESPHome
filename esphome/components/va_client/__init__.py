@@ -15,6 +15,10 @@ CONF_BARGE_IN = "barge_in"
 CONF_ON_PHASE = "on_phase"
 CONF_ON_REPEATED_FAILURE = "on_repeated_failure"
 CONF_ON_FOLLOWUP_OPENED = "on_followup_opened"
+CONF_ON_TIMER_STARTED = "on_timer_started"
+CONF_ON_TIMER_FINISHED = "on_timer_finished"
+CONF_ON_TIMER_CANCELLED = "on_timer_cancelled"
+CONF_ON_TIMER_TICK = "on_timer_tick"
 
 va_client_ns = cg.esphome_ns.namespace("va_client")
 VaClient = va_client_ns.class_("VaClient", cg.Component)
@@ -26,6 +30,18 @@ OnRepeatedFailureTrigger = va_client_ns.class_(
 )
 OnFollowupOpenedTrigger = va_client_ns.class_(
     "OnFollowupOpenedTrigger", automation.Trigger.template()
+)
+OnTimerStartedTrigger = va_client_ns.class_(
+    "OnTimerStartedTrigger", automation.Trigger.template()
+)
+OnTimerFinishedTrigger = va_client_ns.class_(
+    "OnTimerFinishedTrigger", automation.Trigger.template(cg.std_string)
+)
+OnTimerCancelledTrigger = va_client_ns.class_(
+    "OnTimerCancelledTrigger", automation.Trigger.template()
+)
+OnTimerTickTrigger = va_client_ns.class_(
+    "OnTimerTickTrigger", automation.Trigger.template()
 )
 
 CONFIG_SCHEMA = cv.Schema(
@@ -50,6 +66,18 @@ CONFIG_SCHEMA = cv.Schema(
             {
                 cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OnFollowupOpenedTrigger),
             }
+        ),
+        cv.Optional(CONF_ON_TIMER_STARTED): automation.validate_automation(
+            {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OnTimerStartedTrigger)}
+        ),
+        cv.Optional(CONF_ON_TIMER_FINISHED): automation.validate_automation(
+            {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OnTimerFinishedTrigger)}
+        ),
+        cv.Optional(CONF_ON_TIMER_CANCELLED): automation.validate_automation(
+            {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OnTimerCancelledTrigger)}
+        ),
+        cv.Optional(CONF_ON_TIMER_TICK): automation.validate_automation(
+            {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OnTimerTickTrigger)}
         ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
@@ -86,3 +114,13 @@ async def to_code(config):
     for conf in config.get(CONF_ON_FOLLOWUP_OPENED, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         await automation.build_automation(trigger, [], conf)
+
+    for key, args in (
+        (CONF_ON_TIMER_STARTED, []),
+        (CONF_ON_TIMER_FINISHED, [(cg.std_string, "name")]),
+        (CONF_ON_TIMER_CANCELLED, []),
+        (CONF_ON_TIMER_TICK, []),
+    ):
+        for conf in config.get(key, []):
+            trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+            await automation.build_automation(trigger, args, conf)

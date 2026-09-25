@@ -76,6 +76,12 @@ switch:
       - script.execute: control_leds
     on_turn_off:
       - microphone.unmute: sat1_mics
+      - if:
+          condition:
+            switch.is_on: timer_ringing
+          then:
+            - micro_wake_word.enable_model: stop
+            - lambda: id(stop).set_probability_cutoff(102);
       - script.execute: control_leds
 
 text_sensor:

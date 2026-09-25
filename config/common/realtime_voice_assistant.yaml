@@ -75,7 +75,7 @@ va_client:
           lambda: return phase == "replying" || (phase == "thinking" && id(va).turn_has_reply_audio());
         then:
           - micro_wake_word.enable_model: stop
-          - lambda: id(stop).set_probability_cutoff(128);
+          - lambda: 'id(stop).set_probability_cutoff(id(timer_ringing).state ? 102 : 128);'
           - script.stop: followup_window_watchdog
         else:
           - if:
@@ -92,7 +92,7 @@ va_client:
           - script.execute: followup_window_watchdog
     - if:
         condition:
-          lambda: return phase == "thinking" && !id(va).turn_has_reply_audio();
+          lambda: return phase == "thinking" && !id(va).turn_has_reply_audio() && !id(timer_ringing).state;
         then:
           - micro_wake_word.disable_model: stop
     - if:
@@ -107,7 +107,11 @@ va_client:
                 - lambda: id(stop).set_probability_cutoff(102);
                 - script.execute: followup_window_watchdog
               else:
-                - micro_wake_word.disable_model: stop
+                - if:
+                    condition:
+                      switch.is_off: timer_ringing
+                    then:
+                      - micro_wake_word.disable_model: stop
                 - script.stop: followup_window_watchdog
     - if:
         condition:
@@ -115,10 +119,14 @@ va_client:
         then:
           - script.execute: start_realtime_wake_word
   on_repeated_failure:
-    - script.execute:
-        id: play_sound
-        priority: true
-        sound_file: "factory_reset_cancelled_sound"
+    - if:
+        condition:
+          switch.is_off: timer_ringing
+        then:
+          - script.execute:
+              id: play_sound
+              priority: true
+              sound_file: "factory_reset_cancelled_sound"
   on_followup_opened:
     - lambda: |-
         id(followup_window_open) = true;
@@ -165,6 +173,27 @@ va_client:
               id(followup_window_open) = false;
               id(followup_requested) = false;
           - script.execute: reconcile_ducking
+  on_timer_started:
+    - if:
+        condition:
+          lambda: return id(timer_ringing).state && !id(va).has_ringing_timers();
+        then:
+          - switch.turn_off: timer_ringing
+        else:
+          - script.execute: control_leds
+  on_timer_finished:
+    - switch.turn_on: timer_ringing
+    - script.execute: timer_ring_watchdog
+  on_timer_cancelled:
+    - if:
+        condition:
+          lambda: return id(timer_ringing).state && !id(va).has_ringing_timers();
+        then:
+          - switch.turn_off: timer_ringing
+        else:
+          - script.execute: control_leds
+  on_timer_tick:
+    - script.execute: control_leds
 
 micro_wake_word:
   id: mww
@@ -282,23 +311,6 @@ switch:
       - lambda: id(va).set_barge_in(true);
     on_turn_off:
       - lambda: id(va).set_barge_in(false);
-  - platform: template
-    id: timer_ringing
-    internal: true
-    optimistic: true
-    restore_mode: ALWAYS_OFF
-    on_turn_on:
-      - micro_wake_word.enable_model: stop
-      - script.execute: reconcile_ducking
-      - script.execute: control_leds
-    on_turn_off:
-      - micro_wake_word.disable_model: stop
-      - media_player.stop:
-          id: external_media_player
-          announcement: true
-      - script.execute: reconcile_ducking
-      - script.execute: control_leds
-
 script:
   - id: start_realtime_wake_word
     mode: restart
@@ -316,7 +328,7 @@ script:
               return id(voice_assistant_phase) != ${voice_assist_replying_phase_id} &&
                      !(id(voice_assistant_phase) == ${voice_assist_thinking_phase_id} &&
                        id(va).turn_has_reply_audio()) &&
-                     !id(followup_window_open);
+                     !id(followup_window_open) && !id(timer_ringing).state;
           then:
             - micro_wake_word.disable_model: stop
       - script.execute: control_leds
@@ -329,7 +341,11 @@ script:
           id(followup_window_open) = false;
           id(followup_requested) = false;
       - script.stop: followup_window_watchdog
-      - micro_wake_word.disable_model: stop
+      - if:
+          condition:
+            switch.is_off: timer_ringing
+          then:
+            - micro_wake_word.disable_model: stop
       - script.execute: control_leds
       - script.execute: reconcile_ducking
   - id: followup_window_watchdog
@@ -347,7 +363,11 @@ script:
                 id(followup_requested) = false;
                 if (id(voice_assistant_phase) == ${voice_assist_listening_for_command_phase_id})
                   id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
-            - micro_wake_word.disable_model: stop
+            - if:
+                condition:
+                  switch.is_off: timer_ringing
+                then:
+                  - micro_wake_word.disable_model: stop
             - script.execute: control_leds
             - script.execute: reconcile_ducking
   - id: apply_assistant_voice_level
@@ -427,7 +447,11 @@ interval:
                 id(followup_window_open) = false;
                 id(followup_requested) = false;
             - script.stop: followup_window_watchdog
-            - micro_wake_word.disable_model: stop
+            - if:
+                condition:
+                  switch.is_off: timer_ringing
+                then:
+                  - micro_wake_word.disable_model: stop
             - script.execute: control_leds
             - script.execute: reconcile_ducking
 
