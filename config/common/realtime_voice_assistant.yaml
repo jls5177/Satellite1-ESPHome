@@ -149,7 +149,9 @@ va_client:
         condition:
           and:
             - switch.is_off: master_mute_switch
-            - lambda: return id(va).is_connected() && id(followup_window_open);
+            - lambda: |-
+                return id(va).is_connected() && id(va).is_audio_ready() &&
+                       id(followup_window_open);
         then:
           - lambda: id(va).commit_followup_mic();
           - lambda: id(voice_assistant_phase) = ${voice_assist_listening_for_command_phase_id};
@@ -240,7 +242,7 @@ micro_wake_word:
                                 condition:
                                   and:
                                     - switch.is_off: master_mute_switch
-                                    - lambda: return id(va).is_connected();
+                                    - lambda: return id(va).is_connected() && id(va).is_audio_ready();
                                 then:
                                   - lambda: id(va).start_session();
                                   - micro_wake_word.disable_model: stop

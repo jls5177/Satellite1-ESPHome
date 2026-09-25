@@ -177,7 +177,7 @@ binary_sensor:
                                                     and:
                                                       - switch.is_off: master_mute_switch
                                                       - lambda: |-
-                                                          return id(va).is_connected() &&
+                                                          return id(va).is_connected() && id(va).is_audio_ready() &&
                                                                  id(voice_assistant_phase) == ${voice_assist_idle_phase_id} &&
                                                                  !id(followup_window_open);
                                                   then:

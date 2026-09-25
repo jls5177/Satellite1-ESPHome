@@ -442,6 +442,8 @@ script:
             id(control_leds_xmos_flasher_state_update).execute();
           } else if (id(improv_ble_in_progress)) {
             id(control_leds_improv_ble_state).execute();
+          } else if (id(va).is_failed()) {
+            id(control_leds_voice_assistant_not_ready_phase).execute();
           } else if (id(init_in_progress)) {
             id(control_leds_init_state).execute();
           } else if (!id(wifi_id).is_connected() || !id(api_id).is_connected() || !id(va).is_connected()){
