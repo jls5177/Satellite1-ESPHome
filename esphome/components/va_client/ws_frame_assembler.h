@@ -4,10 +4,36 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string_view>
 #include <vector>
 
 namespace esphome {
 namespace va_client {
+
+enum class WsMessageType { UNKNOWN, ERROR, HELLO, AUDIO_DONE, REQUEST_FOLLOW_UP, PHASE };
+
+inline WsMessageType classify_ws_message(std::string_view message) {
+  constexpr std::string_view key = "\"type\":\"";
+  const size_t key_pos = message.find(key);
+  if (key_pos == std::string_view::npos)
+    return WsMessageType::UNKNOWN;
+  const size_t start = key_pos + key.size();
+  const size_t end = message.find('"', start);
+  if (end == std::string_view::npos)
+    return WsMessageType::UNKNOWN;
+  const auto type = message.substr(start, end - start);
+  if (type == "error")
+    return WsMessageType::ERROR;
+  if (type == "hello")
+    return WsMessageType::HELLO;
+  if (type == "audio_done")
+    return WsMessageType::AUDIO_DONE;
+  if (type == "request_follow_up")
+    return WsMessageType::REQUEST_FOLLOW_UP;
+  if (type == "phase")
+    return WsMessageType::PHASE;
+  return WsMessageType::UNKNOWN;
+}
 
 // esp_websocket_client reports offsets within a frame, not within a whole
 // fragmented message. A continuation starts a new frame at offset zero.

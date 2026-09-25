@@ -335,8 +335,9 @@ class VaClient : public Component {
   std::atomic<bool> playback_priming_{false};
   std::atomic<bool> fade_in_pending_{true};
   std::atomic<bool> fade_out_pending_{false};
-  // Also set when the downstream chain runs dry with only the fade window
-  // held back, or when a replying -> thinking transition ends a reply segment.
+  // Also set by audio_done (before the debounced idle), when the downstream
+  // chain runs dry with only the fade window held back, or when a replying ->
+  // thinking transition ends a reply segment.
   std::atomic<bool> reply_audio_done_{false};
   std::atomic<bool> thinking_tail_pending_{false};
   // millis() when priming started (first byte after the ring was empty); used

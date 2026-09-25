@@ -830,8 +830,9 @@ void VaClient::on_ws_event(int32_t event_id, void *event_data) {
 void VaClient::handle_text_(const char *data, size_t len) {
   std::string msg(data, len);
   ESP_LOGD(TAG, "WS text: %s", msg.c_str());
+  const auto type = classify_ws_message(msg);
 
-  if (msg.find("\"type\":\"error\"") != std::string::npos) {
+  if (type == WsMessageType::ERROR) {
     ESP_LOGW(TAG, "Server reported error: %s", msg.c_str());
     this->streaming_ = false;
     this->session_starting_ = false;
@@ -859,7 +860,7 @@ void VaClient::handle_text_(const char *data, size_t len) {
     return;
   }
 
-  if (msg.find("\"type\":\"hello\"") != std::string::npos) {
+  if (type == WsMessageType::HELLO) {
     // Handshake ack from the backend. It may carry follow-up tuning so the
     // device behaviour is configurable from the add-on (no reflash): a reconnect
     // after an add-on restart re-reads these.
@@ -908,7 +909,18 @@ void VaClient::handle_text_(const char *data, size_t len) {
   if (this->session_starting_ || this->control_channel_dirty_)
     return;
 
-  if (msg.find("\"type\":\"request_follow_up\"") != std::string::npos) {
+  if (type == WsMessageType::AUDIO_DONE) {
+    if (!this->reply_audio_done_) {
+      portENTER_CRITICAL(&this->ring_mux_);
+      this->fade_ring_tail_();
+      this->fade_out_pending_ = false;
+      this->reply_audio_done_ = true;
+      portEXIT_CRITICAL(&this->ring_mux_);
+    }
+    return;
+  }
+
+  if (type == WsMessageType::REQUEST_FOLLOW_UP) {
     // Server's model called the request_follow_up tool — it asked a
     // question and wants the user to answer without saying a wake word.
     // Defer to loop()'s waiting_for_speaker_stop_ logic so we only fire
@@ -924,6 +936,8 @@ void VaClient::handle_text_(const char *data, size_t len) {
     return;
   }
 
+  if (type != WsMessageType::PHASE)
+    return;
   // Substring match on `"value":"<phase>"` — keeps us out of a JSON parser
   // until M3 needs richer payloads.
   static const char *const kPhases[] = {"listening", "thinking", "replying", "idle"};
@@ -1282,7 +1296,8 @@ void VaClient::set_phase_(const std::string &phase) {
       this->reply_audio_done_ = true;
     } else if (phase == "replying") {
       bool old_reply_remaining = false;
-      if (prev == Phase::THINKING && this->thinking_tail_pending_) {
+      if ((prev == Phase::THINKING && this->thinking_tail_pending_) ||
+          (prev == Phase::REPLYING && this->reply_audio_done_)) {
         portENTER_CRITICAL(&this->ring_mux_);
         if (this->audio_fill_ > 0 && this->audio_fill_ <= kFadeSamples * sizeof(int16_t)) {
           this->audio_head_ = this->audio_tail_ = this->audio_fill_ = 0;
@@ -1323,7 +1338,8 @@ void VaClient::set_phase_(const std::string &phase) {
   } else if (phase == "idle") {
     this->thinking_tail_pending_ = false;
     this->playback_priming_ = false;
-    this->fade_out_pending_ = true;
+    if (!this->reply_audio_done_)
+      this->fade_out_pending_ = true;
     this->reply_audio_done_ = true;
     if (!(prev == Phase::REPLYING && this->turn_t_first_audio_out_ == 0 &&
           this->streaming_)) {

@@ -9,6 +9,8 @@
 
 using esphome::va_client::Pcm16FrameAssembler;
 using esphome::va_client::WsTextAssembler;
+using esphome::va_client::WsMessageType;
+using esphome::va_client::classify_ws_message;
 using esphome::va_client::release_fade_tail;
 
 static void test_pcm_split_at_every_byte() {
@@ -63,6 +65,30 @@ static void test_text_split_and_fragmented() {
     assert(result == (i + 1 == message.size() ? Result::COMPLETE : Result::INCOMPLETE));
   }
   assert(std::string(assembler.data(), assembler.size()) == message);
+  assert(classify_ws_message(std::string_view(assembler.data(), assembler.size())) ==
+         WsMessageType::HELLO);
+  constexpr char done[] = "{\"type\":\"audio_done\"}";
+  assembler.reset();
+  assert(assembler.append(false, true, done, 7, 0, sizeof(done) - 1) == Result::INCOMPLETE);
+  assert(assembler.append(false, true, done + 7, sizeof(done) - 8, 7, sizeof(done) - 1) ==
+         Result::COMPLETE);
+  assert(classify_ws_message(std::string_view(assembler.data(), assembler.size())) ==
+         WsMessageType::AUDIO_DONE);
+}
+
+static void test_message_types() {
+  assert(classify_ws_message("{\"type\":\"audio_done\"}") == WsMessageType::AUDIO_DONE);
+  assert(classify_ws_message("{\"type\":\"audio_done\",\"value\":\"idle\"}") ==
+         WsMessageType::AUDIO_DONE);
+  assert(classify_ws_message("{\"type\":\"audio_done_extra\"}") == WsMessageType::UNKNOWN);
+  assert(classify_ws_message("{\"type\":\"new_type\",\"value\":\"idle\"}") ==
+         WsMessageType::UNKNOWN);
+  assert(classify_ws_message("{\"type\":\"phase\",\"value\":\"idle\"}") ==
+         WsMessageType::PHASE);
+  assert(classify_ws_message("{\"type\":\"request_follow_up\"}") ==
+         WsMessageType::REQUEST_FOLLOW_UP);
+  assert(classify_ws_message("{\"type\":\"error\"}") == WsMessageType::ERROR);
+  assert(classify_ws_message("{\"type\":\"invalid}") == WsMessageType::UNKNOWN);
 }
 
 static void test_text_bounds_and_out_of_order() {
@@ -95,6 +121,7 @@ int main() {
   test_pcm_split_at_every_byte();
   test_pcm_continuations_and_flush();
   test_text_split_and_fragmented();
+  test_message_types();
   test_text_bounds_and_out_of_order();
   test_tail_starvation();
   return 0;
