@@ -173,6 +173,25 @@ Before updating your ESPHome Device Builder, verify that the latest Satellite1 f
 
 
 ### Terminal Builds
+For the opt-in realtime WebSocket voice variant, build
+`config/satellite1.realtime.yaml` instead of `config/satellite1.yaml`.
+Set `va_url` to your LAN realtime bridge (default:
+`ws://homeassistant.local:8080/`) and, if necessary, `va_mic_channel`
+(0 or 1). The stock firmware/configuration is unchanged. This variant retains
+ESPHome OTA, the regular media player and Sendspin; it does **not** install
+the stock Home Assistant voice pipeline or the FPH HTTP update provider.
+The assistant has its own mixer lane and a separate restored voice-level
+control; muting the media player silences assistant audio as well.
+Timers are not synchronized with the realtime bridge (the internal ringing
+switch is only a compatibility stub). Hands-free interrupt is off by default
+because acoustic echo can trigger false barge-ins.
+
+For dashboard builds, copy `config/satellite1.realtime.dashboard.yaml` and
+point `realtime_repo_url`/`realtime_repo_ref` at a fork/ref containing **both**
+the realtime packages and `esphome/components/va_client`. The default FPH URL
+is a placeholder until the realtime variant is published there. Dashboard
+builds require ESPHome 2026.8.1 or a compatible release.
+
 Create/activate environment by running from project root:
 ```bash
 source scripts/setup_build_env.sh

@@ -1,0 +1,34 @@
+substitutions:
+  name: satellite1
+  friendly_name: Satellite1
+  log_level: debug
+  va_url: "ws://homeassistant.local:8080/"
+  va_mic_channel: "0"
+  # Placeholder: point this at your fork containing the realtime packages and va_client.
+  realtime_repo_url: "https://github.com/FutureProofHomes/Satellite1-ESPHome"
+  realtime_repo_ref: "feature/realtime-va"
+
+esphome:
+  name: ${name}
+  name_add_mac_suffix: true
+  friendly_name: ${friendly_name}
+
+packages:
+  FutureProofHomes.Satellite1.realtime:
+    url: ${realtime_repo_url}
+    ref: ${realtime_repo_ref}
+    refresh: 1s
+    files:
+      - config/satellite1.realtime.base.yaml
+      - config/common/dashboard_build.yaml
+      - path: config/common/realtime_components.external.yaml
+        vars:
+          ext_comp_repo_url: ${realtime_repo_url}
+          ext_comp_repo_ref: ${realtime_repo_ref}
+
+logger:
+  level: ${log_level}
+
+# api:
+#   encryption:
+#     key: REPLACE_BY_32_BIT_RANDOM_KEY

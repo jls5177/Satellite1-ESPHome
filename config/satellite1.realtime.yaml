@@ -1,0 +1,54 @@
+substitutions:
+  company_name: FutureProofHomes
+  project_name: Satellite1
+  esp32_fw_version: dev
+  xmos_auto_flash_on_boot: "true"
+  va_url: "ws://homeassistant.local:8080/"
+  va_mic_channel: "0"
+
+packages:
+  ble_lifecycle:
+    wifi:
+      on_disconnect:
+        - ble.enable:
+      on_connect:
+        - delay: 5s
+        - ble.disable:
+  satellite1_realtime: !include satellite1.realtime.base.yaml
+
+esphome:
+  project:
+    name: ${company_name}.${project_name}
+    version: ${esp32_fw_version}
+
+esp32_improv:
+  authorizer: btn_action
+  on_start:
+    - lambda: id(improv_ble_in_progress) = true;
+    - script.execute: control_leds
+  on_provisioned:
+    - lambda: id(improv_ble_in_progress) = false;
+    - script.execute: control_leds
+  on_stop:
+    - lambda: id(improv_ble_in_progress) = false;
+    - script.execute: control_leds
+
+external_components:
+  - source:
+      type: local
+      path: ../esphome/components
+    components:
+      - fusb302b
+      - i2s_audio
+      - memory_flasher
+      - satellite1
+      - satellite1_radar
+      - tas2780
+      - va_client
+
+logger:
+  deassert_rts_dtr: true
+  hardware_uart: USB_SERIAL_JTAG
+  level: debug
+  logs:
+    ltr_als_ps: WARN
