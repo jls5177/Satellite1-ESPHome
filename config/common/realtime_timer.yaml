@@ -1,3 +1,10 @@
+button:
+  - platform: template
+    name: Stop Timer Ringing
+    icon: mdi:timer-off
+    on_press:
+      - switch.turn_off: timer_ringing
+
 switch:
   - platform: template
     id: timer_ringing
