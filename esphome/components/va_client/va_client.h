@@ -4,6 +4,7 @@
 #include "esphome/components/microphone/microphone.h"
 #include "esphome/components/speaker/speaker.h"
 #include "mic_tx_ring.h"
+#include "va_timers.h"
 #include "ws_frame_assembler.h"
 
 #include <atomic>
@@ -23,6 +24,10 @@ namespace va_client {
 class OnPhaseTrigger;
 class OnRepeatedFailureTrigger;
 class OnFollowupOpenedTrigger;
+class OnTimerStartedTrigger;
+class OnTimerFinishedTrigger;
+class OnTimerCancelledTrigger;
+class OnTimerTickTrigger;
 
 class VaClient : public Component {
  public:
@@ -55,6 +60,15 @@ class VaClient : public Component {
   void add_on_followup_opened_trigger(OnFollowupOpenedTrigger *t) {
     followup_opened_triggers_.push_back(t);
   }
+  void add_on_timer_started_trigger(OnTimerStartedTrigger *t) { timer_started_triggers_.push_back(t); }
+  void add_on_timer_finished_trigger(OnTimerFinishedTrigger *t) { timer_finished_triggers_.push_back(t); }
+  void add_on_timer_cancelled_trigger(OnTimerCancelledTrigger *t) { timer_cancelled_triggers_.push_back(t); }
+  void add_on_timer_tick_trigger(OnTimerTickTrigger *t) { timer_tick_triggers_.push_back(t); }
+
+  bool has_active_timers() const { return timers_.has_active(millis()); }
+  bool has_ringing_timers() const { return timers_.has_ringing(); }
+  TimerInfo first_active_timer() const { return timers_.first_active(millis()); }
+  void stop_ringing();
 
   bool is_connected() const { return ws_connected_.load(); }
   // False if setup could not allocate playback buffers; safe for YAML
@@ -132,6 +146,9 @@ class VaClient : public Component {
   // session open — see preroll_discard_pending_.
   void preroll_push_(const int16_t *data, size_t n);
   void handle_text_(const char *data, size_t len);
+  void handle_timer_command_(const TimerCommand &command);
+  void send_timer_state_();
+  void send_timer_ack_(const std::string &request_id, VaTimers::Result result);
   void handle_binary_(const uint8_t *data, size_t len);
   void set_phase_(const std::string &phase);
   // Marshal a phase-LED trigger fire onto the main loop (used to drive the LED
@@ -195,6 +212,13 @@ class VaClient : public Component {
   std::vector<OnPhaseTrigger *> phase_triggers_;
   std::vector<OnRepeatedFailureTrigger *> repeated_failure_triggers_;
   std::vector<OnFollowupOpenedTrigger *> followup_opened_triggers_;
+  std::vector<OnTimerStartedTrigger *> timer_started_triggers_;
+  std::vector<OnTimerFinishedTrigger *> timer_finished_triggers_;
+  std::vector<OnTimerCancelledTrigger *> timer_cancelled_triggers_;
+  std::vector<OnTimerTickTrigger *> timer_tick_triggers_;
+  // Main-loop owned: WS callbacks enqueue commands with defer(), never touch timers_.
+  VaTimers timers_;
+  uint32_t last_timer_tick_ms_{0};
 
   // Counts consecutive failed reconnect attempts. Reset to 0 on a clean
   // WS_CONNECTED event. When it hits kRepeatedFailureThreshold we fire the

@@ -94,6 +94,7 @@ packages:
   assistant_speaker: !include common/realtime_speaker_lane.yaml
   mp: !include common/realtime_media_player.yaml
   va: !include common/realtime_voice_assistant.yaml
+  timer: !include common/realtime_timer.yaml
   led_ring: !include common/realtime_led_ring.yaml
   mmwave: !include common/mmwave.yaml
   sendspin: !include common/sendspin.yaml

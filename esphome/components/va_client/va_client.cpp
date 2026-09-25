@@ -184,6 +184,22 @@ void VaClient::setup() {
 }
 
 void VaClient::loop() {
+  const uint32_t timer_now = millis();
+  for (const auto &finished : this->timers_.expire(timer_now)) {
+    ESP_LOGI(TAG, "Timer finished: %s", finished.id.c_str());
+    for (auto *t : this->timer_finished_triggers_)
+      t->trigger(finished.name);
+    if (this->ws_connected_ && !this->control_channel_dirty_) {
+      const std::string message = timer_finished_json(finished);
+      this->send_control_(message.c_str(), message.size(), "timer_finished");
+    }
+  }
+  if (this->timers_.has_active(timer_now) &&
+      timer_now - this->last_timer_tick_ms_ >= 1000u) {
+    this->last_timer_tick_ms_ = timer_now;
+    for (auto *t : this->timer_tick_triggers_)
+      t->trigger();
+  }
   if (this->reconnect_requested_.exchange(false)) {
     this->ws_stop_completed_ = false;
     xTaskNotifyGive(this->ws_teardown_task_);
@@ -745,6 +761,11 @@ void VaClient::on_ws_event(int32_t event_id, void *event_data) {
       this->control_channel_dirty_ = false;
       ++this->connection_epoch_;
       this->ws_connected_ = true;
+      const uint32_t timer_epoch = this->connection_epoch_.load();
+      this->defer([this, timer_epoch]() {
+        if (this->connection_epoch_.load() == timer_epoch && this->ws_connected_)
+          this->send_timer_state_();
+      });
       this->reconnect_delay_ms_ = 1000;  // reset backoff on a clean open
       // Don't reset the failure counter / fired flag yet — a flap-and-die
       // link would spam chimes. Only re-arm after the connection has held
@@ -831,6 +852,24 @@ void VaClient::handle_text_(const char *data, size_t len) {
   std::string msg(data, len);
   ESP_LOGD(TAG, "WS text: %s", msg.c_str());
   const auto type = classify_ws_message(msg);
+
+  if (type == WsMessageType::TIMER_START || type == WsMessageType::TIMER_CANCEL ||
+      type == WsMessageType::TIMER_LIST) {
+    TimerCommand command;
+    const bool valid = parse_timer_command(msg, command);
+    const uint32_t epoch = this->connection_epoch_.load();
+    this->defer([this, command, valid, epoch]() {
+      if (this->connection_epoch_.load() != epoch || !this->ws_connected_)
+        return;
+      if (!valid) {
+        ESP_LOGW(TAG, "Invalid timer request");
+        this->send_timer_ack_(command.request_id, VaTimers::Result::INVALID);
+      } else {
+        this->handle_timer_command_(command);
+      }
+    });
+    return;
+  }
 
   if (type == WsMessageType::ERROR) {
     ESP_LOGW(TAG, "Server reported error: %s", msg.c_str());
@@ -948,6 +987,45 @@ void VaClient::handle_text_(const char *data, size_t len) {
       return;
     }
   }
+}
+
+void VaClient::handle_timer_command_(const TimerCommand &command) {
+  VaTimers::Result result = VaTimers::Result::OK;
+  if (command.kind == TimerCommand::Kind::START) {
+    result = this->timers_.start(command.id, command.name, command.duration_s, millis());
+    if (result == VaTimers::Result::OK) {
+      this->last_timer_tick_ms_ = millis();
+      for (auto *t : this->timer_started_triggers_)
+        t->trigger();
+    }
+  } else if (command.kind == TimerCommand::Kind::CANCEL) {
+    if (command.all) {
+      if (this->timers_.cancel_all())
+        for (auto *t : this->timer_cancelled_triggers_)
+          t->trigger();
+    } else {
+      result = this->timers_.cancel(command.id);
+      if (result == VaTimers::Result::OK)
+        for (auto *t : this->timer_cancelled_triggers_)
+          t->trigger();
+    }
+  }
+  this->send_timer_ack_(command.request_id, result);
+}
+
+void VaClient::send_timer_ack_(const std::string &request_id, VaTimers::Result result) {
+  const std::string message = timer_ack_json(request_id, result, this->timers_.list(millis()));
+  this->send_control_(message.c_str(), message.size(), "timer_ack");
+}
+
+void VaClient::send_timer_state_() {
+  const std::string message = timer_state_json(this->timers_.list(millis()));
+  this->send_control_(message.c_str(), message.size(), "timer_state");
+}
+
+void VaClient::stop_ringing() {
+  if (this->timers_.stop_ringing() && this->ws_connected_ && !this->control_channel_dirty_)
+    this->send_timer_state_();
 }
 
 void VaClient::handle_binary_(const uint8_t *data, size_t len) {

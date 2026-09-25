@@ -31,5 +31,25 @@ class OnFollowupOpenedTrigger : public Trigger<> {
   }
 };
 
+class OnTimerStartedTrigger : public Trigger<> {
+ public:
+  explicit OnTimerStartedTrigger(VaClient *parent) { parent->add_on_timer_started_trigger(this); }
+};
+
+class OnTimerFinishedTrigger : public Trigger<std::string> {
+ public:
+  explicit OnTimerFinishedTrigger(VaClient *parent) { parent->add_on_timer_finished_trigger(this); }
+};
+
+class OnTimerCancelledTrigger : public Trigger<> {
+ public:
+  explicit OnTimerCancelledTrigger(VaClient *parent) { parent->add_on_timer_cancelled_trigger(this); }
+};
+
+class OnTimerTickTrigger : public Trigger<> {
+ public:
+  explicit OnTimerTickTrigger(VaClient *parent) { parent->add_on_timer_tick_trigger(this); }
+};
+
 }  // namespace va_client
 }  // namespace esphome

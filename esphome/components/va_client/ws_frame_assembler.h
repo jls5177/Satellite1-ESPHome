@@ -10,14 +10,28 @@
 namespace esphome {
 namespace va_client {
 
-enum class WsMessageType { UNKNOWN, ERROR, HELLO, AUDIO_DONE, REQUEST_FOLLOW_UP, PHASE };
+enum class WsMessageType {
+  UNKNOWN, ERROR, HELLO, AUDIO_DONE, REQUEST_FOLLOW_UP, PHASE,
+  TIMER_START, TIMER_CANCEL, TIMER_LIST
+};
 
 inline WsMessageType classify_ws_message(std::string_view message) {
-  constexpr std::string_view key = "\"type\":\"";
+  constexpr std::string_view key = "\"type\"";
   const size_t key_pos = message.find(key);
   if (key_pos == std::string_view::npos)
     return WsMessageType::UNKNOWN;
-  const size_t start = key_pos + key.size();
+  size_t start = key_pos + key.size();
+  const auto skip_space = [&]() {
+    while (start < message.size() && (message[start] == ' ' || message[start] == '\t' ||
+                                      message[start] == '\n' || message[start] == '\r'))
+      ++start;
+  };
+  skip_space();
+  if (start == message.size() || message[start++] != ':')
+    return WsMessageType::UNKNOWN;
+  skip_space();
+  if (start == message.size() || message[start++] != '"')
+    return WsMessageType::UNKNOWN;
   const size_t end = message.find('"', start);
   if (end == std::string_view::npos)
     return WsMessageType::UNKNOWN;
@@ -32,6 +46,12 @@ inline WsMessageType classify_ws_message(std::string_view message) {
     return WsMessageType::REQUEST_FOLLOW_UP;
   if (type == "phase")
     return WsMessageType::PHASE;
+  if (type == "timer_start")
+    return WsMessageType::TIMER_START;
+  if (type == "timer_cancel")
+    return WsMessageType::TIMER_CANCEL;
+  if (type == "timer_list")
+    return WsMessageType::TIMER_LIST;
   return WsMessageType::UNKNOWN;
 }
 

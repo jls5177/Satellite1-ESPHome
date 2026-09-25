@@ -330,6 +330,36 @@ light:
             if (brightness_step == 0 || brightness_step == brightness_step_number) {
               brightness_decreasing = !brightness_decreasing;
             }
+      - addressable_lambda:
+          name: "Timer Tick"
+          update_interval: 100ms
+          lambda: |-
+            const auto timer = id(va).first_active_timer();
+            const float timer_ratio = 24.0f * timer.seconds_left /
+                                      (timer.total_seconds > 0 ? timer.total_seconds : 1);
+            auto light_color = id(led_ring).current_values;
+            Color color(light_color.get_red() * 255, light_color.get_green() * 255,
+                        light_color.get_blue() * 255);
+            const uint8_t last_led_on = static_cast<uint8_t>(ceil(timer_ratio)) - 1;
+            for (int i = 0; i < 24; i++) {
+              const float brightness_dip =
+                  (i == id(global_led_animation_index) % 24 && i != last_led_on) ? 0.9f : 1.0f;
+              if (i <= timer_ratio) {
+                it[i] = color * min(255.0f * brightness_dip * (timer_ratio - i),
+                                    255.0f * brightness_dip);
+              } else {
+                it[i] = Color::BLACK;
+              }
+            }
+            if (id(master_mute_switch).state) {
+              it[2] = Color::BLACK;
+              it[3] = Color(255, 0, 0);
+              it[4] = Color::BLACK;
+              it[8] = Color::BLACK;
+              it[9] = Color(255, 0, 0);
+              it[10] = Color::BLACK;
+            }
+            id(global_led_animation_index) = (24 + id(global_led_animation_index) - 1) % 24;
       - addressable_rainbow:
           name: "Rainbow"
           width: 24
@@ -442,6 +472,8 @@ script:
             id(control_leds_xmos_flasher_state_update).execute();
           } else if (id(improv_ble_in_progress)) {
             id(control_leds_improv_ble_state).execute();
+          } else if (id(timer_ringing).state) {
+            id(control_leds_timer_ringing).execute();
           } else if (id(va).is_failed()) {
             id(control_leds_voice_assistant_not_ready_phase).execute();
           } else if (id(init_in_progress)) {
@@ -458,8 +490,6 @@ script:
             id(control_leds_jack_unplugged_recently).execute();
           } else if (id(warning)) {
             id(control_leds_warning).execute();
-          } else if (id(timer_ringing).state) {
-            id(control_leds_timer_ringing).execute();
           } else if (id(voice_assistant_phase) == ${voice_assist_waiting_for_command_phase_id}) {
             id(control_leds_voice_assistant_waiting_for_command_phase).execute();
           } else if (id(voice_assistant_phase) == ${voice_assist_listening_for_command_phase_id}) {
@@ -472,6 +502,8 @@ script:
             id(control_leds_voice_assistant_error_phase).execute();
           } else if (id(voice_assistant_phase) == ${voice_assist_not_ready_phase_id}) {
             id(control_leds_voice_assistant_not_ready_phase).execute();
+          } else if (id(va).has_active_timers()) {
+            id(control_leds_timer_ticking).execute();
           } else if (id(master_mute_switch).state) {
             id(control_leds_muted_or_silent).execute();
           } else if (id(external_media_player).volume == 0.0f || id(external_media_player).is_muted()) {
@@ -676,8 +708,14 @@ script:
           id: voice_assistant_leds
           effect: "Timer Ring"
 
-  # Script executed when the timer is ticking, to control the LEDs
-  # The LEDs shows the remaining time as a fraction of the full ring.
+  # Show the remaining time as a fraction of the ring.
+  - id: control_leds_timer_ticking
+    then:
+      - light.turn_on:
+          brightness: !lambda return min ( max( id(led_ring).current_values.get_brightness() , 0.2f ) + 0.1f , 1.0f );
+          id: voice_assistant_leds
+          effect: "Timer Tick"
+
   - id: control_leds_xmos_flasher_state_update
     then:
       - if:
