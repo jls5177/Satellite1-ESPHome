@@ -270,6 +270,8 @@ number:
       - script.execute: apply_assistant_voice_level
 
 switch:
+  # Hands-free interrupt also requires interrupt_response enabled in the
+  # realtime add-on; the device keeps the mic gated while the server has it off.
   - platform: template
     id: hands_free_interrupt
     name: "Hands-free interrupt"

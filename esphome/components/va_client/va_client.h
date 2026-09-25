@@ -4,6 +4,7 @@
 #include "esphome/components/microphone/microphone.h"
 #include "esphome/components/speaker/speaker.h"
 #include "mic_tx_ring.h"
+#include "ws_frame_assembler.h"
 
 #include <atomic>
 #include <cstddef>
@@ -29,7 +30,8 @@ class VaClient : public Component {
   void set_microphone(microphone::Microphone *m) { mic_ = m; }
   void set_mic_channel(uint8_t c) { mic_channel_ = c; }
   void set_speaker(speaker::Speaker *s) { speaker_ = s; }
-  // Enables handsfree barge-in: when true the mic keeps streaming through the
+  // Requests handsfree barge-in when the server also advertises support.
+  // When both are true the mic keeps streaming through the
   // `thinking`/`replying` phases instead of being gated off, so the backend's
   // server VAD can hear the user talk over the assistant. On the `listening`
   // transition that follows (server confirmed a barge-in) we flush the PSRAM
@@ -38,6 +40,7 @@ class VaClient : public Component {
   // speaks). Relies on the XMOS AEC to suppress speaker→mic echo; see the
   // ~10x leak caveat in CLAUDE.md. Safe to change from a HA switch at runtime.
   void set_barge_in(bool v);
+  bool is_server_barge_in_enabled() const { return this->server_barge_in_.load(); }
   // Sets the output-volume multiplier applied to TTS in handle_binary_.
   // Driven from yaml by external_media_player's volume / mute state so the
   // device's physical +/- buttons and mute switch scale our TTS the same
@@ -111,10 +114,15 @@ class VaClient : public Component {
   bool send_control_(const char *message, size_t length, const char *operation,
                      bool start_marker = false);
   void fail_control_channel_(const char *operation);
+  bool effective_barge_in_() const {
+    return this->barge_in_.load() && this->server_barge_in_.load();
+  }
   void reset_connection_state_();
   void clear_mic_tx_();
   static void mic_sender_task_trampoline_(void *arg);
   void mic_sender_loop_();
+  static void ws_teardown_task_trampoline_(void *arg);
+  void ws_teardown_loop_();
   void log_mic_health_();
   void fade_ring_head_();
   void fade_ring_tail_();
@@ -145,6 +153,11 @@ class VaClient : public Component {
   std::atomic<bool> session_starting_{false};
   std::atomic<bool> control_channel_dirty_{false};
   std::atomic<bool> reconnect_requested_{false};
+  std::atomic<bool> ws_task_finished_{true};
+  std::atomic<bool> ws_stop_completed_{true};
+  std::atomic<bool> ws_destroy_requested_{false};
+  bool reconnect_start_pending_{false};
+  TaskHandle_t ws_teardown_task_{nullptr};
   std::atomic<uint32_t> connection_epoch_{0};
   static constexpr uint32_t kWsControlSendTimeoutMs = 250;
   static constexpr size_t kMicTxBufferBytes = 64 * 1024;
@@ -230,7 +243,10 @@ class VaClient : public Component {
   //   - between wake-word start_session() and "listening"/"thinking"
   //   - and again after "idle" for kFollowupMs (in case AI asked a question)
   // Handsfree barge-in toggle, set from yaml (`barge_in:`). See set_barge_in().
-  std::atomic<bool> barge_in_{true};
+  std::atomic<bool> barge_in_{false};
+  std::atomic<bool> server_barge_in_{false};
+  std::atomic<bool> server_hello_received_{false};
+  std::atomic<bool> server_barge_warning_logged_{false};
   // Set on phase=idle when there's still TTS audio queued — we can't open
   // the mic until the speaker drains, otherwise it picks up its own output.
   // loop() flips this to a live followup window once audio_fill_ hits 0.
@@ -319,7 +335,10 @@ class VaClient : public Component {
   std::atomic<bool> playback_priming_{false};
   std::atomic<bool> fade_in_pending_{true};
   std::atomic<bool> fade_out_pending_{false};
+  // Also set when the downstream chain runs dry with only the fade window
+  // held back, or when a replying -> thinking transition ends a reply segment.
   std::atomic<bool> reply_audio_done_{false};
+  std::atomic<bool> thinking_tail_pending_{false};
   // millis() when priming started (first byte after the ring was empty); used
   // for the prime deadline so real-time (non-burst) audio still starts promptly.
   std::atomic<uint32_t> prime_started_ms_{0};
@@ -387,9 +406,14 @@ class VaClient : public Component {
   // Used to fire the fallback timeout if the chain never drains.
   uint32_t speaker_stop_wait_started_ms_{0};
 
-  // Tracks the opcode of the in-flight WS message so we can route
-  // continuation frames (op_code = 0) to the same handler.
+  // WS event task owns both assemblers; main-task flushes invalidate the
+  // PCM assembler through audio_ring_epoch_ before the next data event.
   bool last_data_was_binary_{false};
+  WsTextAssembler text_assembler_;
+  Pcm16FrameAssembler pcm_assembler_;
+  std::vector<uint8_t> pcm_chunk_;
+  uint32_t pcm_epoch_{0};
+  uint32_t frame_connection_epoch_{0};
 
   // Output volume multiplier in [0, 1], updated from yaml whenever
   // external_media_player.volume / mute changes. Defaults to 1.0 so a

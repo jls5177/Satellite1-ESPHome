@@ -47,14 +47,42 @@ static bool parse_uint_after_key(const std::string &msg, const char *key, uint32
   return true;
 }
 
+static bool parse_bool_after_key(const std::string &msg, const char *key, bool &out) {
+  size_t p = msg.find(key);
+  if (p == std::string::npos)
+    return false;
+  p += std::strlen(key);
+  while (p < msg.size() && (msg[p] == ' ' || msg[p] == '\t'))
+    ++p;
+  if (p >= msg.size() || msg[p++] != ':')
+    return false;
+  while (p < msg.size() && (msg[p] == ' ' || msg[p] == '\t'))
+    ++p;
+  if (msg.compare(p, 4, "true") == 0) {
+    p += 4;
+    out = true;
+  } else if (msg.compare(p, 5, "false") == 0) {
+    p += 5;
+    out = false;
+  } else {
+    return false;
+  }
+  return p == msg.size() || msg[p] == ',' || msg[p] == '}' || msg[p] == ' ';
+}
+
 void VaClient::set_barge_in(bool enabled) {
   this->barge_in_ = enabled;
+  if (enabled && this->ws_connected_ && this->server_hello_received_ &&
+      !this->server_barge_in_ &&
+      !this->server_barge_warning_logged_.exchange(true)) {
+    ESP_LOGW(TAG, "hands-free interrupt is on but add-on interrupt_response is off");
+  }
   if (static_cast<Phase>(this->current_phase_.load()) != Phase::REPLYING ||
       !this->ws_connected_ || this->session_starting_)
     return;
   this->streaming_ = false;
   this->clear_mic_tx_();
-  if (enabled && !this->post_stop_guard_ && !this->control_channel_dirty_) {
+  if (this->effective_barge_in_() && !this->post_stop_guard_ && !this->control_channel_dirty_) {
     this->streaming_ = true;
     const Phase phase = static_cast<Phase>(this->current_phase_.load());
     if (phase != Phase::REPLYING && phase != Phase::LISTENING)
@@ -135,6 +163,12 @@ void VaClient::setup() {
     this->mark_failed();
     return;
   }
+  if (xTaskCreate(ws_teardown_task_trampoline_, "va_ws_stop", 4096, this, 5,
+                  &this->ws_teardown_task_) != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create WebSocket teardown task");
+    this->mark_failed();
+    return;
+  }
 
   // Tell the resampler what format we'll feed it. The resampler converts to
   // its yaml-configured output format (48k 16-bit) before passing to the
@@ -151,21 +185,31 @@ void VaClient::setup() {
 
 void VaClient::loop() {
   if (this->reconnect_requested_.exchange(false)) {
-    auto handle = static_cast<esp_websocket_client_handle_t>(this->ws_handle_);
-    if (handle != nullptr) {
-      const esp_err_t err = esp_websocket_client_stop(handle);
-      if (err != ESP_OK)
-        ESP_LOGE(TAG, "WebSocket stop for control failure returned %d", (int) err);
-    }
+    this->ws_stop_completed_ = false;
+    xTaskNotifyGive(this->ws_teardown_task_);
     this->schedule_reconnect_();
+  }
+  if (this->reconnect_start_pending_ && !this->reconnect_pending_ &&
+      this->ws_task_finished_ && this->ws_stop_completed_) {
+    this->reconnect_start_pending_ = false;
+    this->connect_();
   }
   this->log_mic_health_();
   // Drain the audio ring buffer into the speaker. speaker.play() accepts
   // only what fits in its own ring (returns the count actually queued).
   if (this->speaker_ != nullptr && this->is_audio_ready()) {
+    const bool speaker_dry = !this->speaker_->has_buffered_data();
     // Snapshot ring state under the lock — head/tail/fill are all
     // mutated from the WS task on the other core.
     portENTER_CRITICAL(&this->ring_mux_);
+    const uint32_t now_ms = millis();
+    const bool starved_tail = !this->reply_audio_done_ &&
+        release_fade_tail(this->audio_fill_, kFadeSamples * sizeof(int16_t),
+                          false, speaker_dry, now_ms, this->last_binary_ms_, kWsGapWarnMs);
+    if (starved_tail) {
+      this->reply_audio_done_ = true;
+      this->fade_out_pending_ = true;
+    }
     if (this->fade_out_pending_.exchange(false))
       this->fade_ring_tail_();
     size_t head = this->audio_head_;
@@ -173,8 +217,7 @@ void VaClient::loop() {
     size_t fill = this->audio_fill_;
     uint32_t epoch = this->audio_ring_epoch_;
     portEXIT_CRITICAL(&this->ring_mux_);
-    // Retain the final 10 ms until response.done so the fade-out can be
-    // applied even when the upstream sends audio faster than playback.
+    // Retain the fade window until the reply ends or the downstream runs dry.
     const size_t playable = this->reply_audio_done_.load() ? fill :
         (fill > kFadeSamples * sizeof(int16_t) ? fill - kFadeSamples * sizeof(int16_t) : 0);
     if (playable == 0 && fill > 0 && !this->reply_audio_done_ &&
@@ -379,6 +422,34 @@ void VaClient::mic_sender_task_trampoline_(void *arg) {
   static_cast<VaClient *>(arg)->mic_sender_loop_();
 }
 
+void VaClient::ws_teardown_task_trampoline_(void *arg) {
+  static_cast<VaClient *>(arg)->ws_teardown_loop_();
+}
+
+void VaClient::ws_teardown_loop_() {
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    auto handle = static_cast<esp_websocket_client_handle_t>(this->ws_handle_);
+    if (this->ws_destroy_requested_.exchange(false)) {
+      if (handle != nullptr) {
+        const esp_err_t err = esp_websocket_client_destroy(handle);
+        if (err != ESP_OK)
+          ESP_LOGE(TAG, "WebSocket destroy after registration failure: %d", (int) err);
+        this->ws_handle_ = nullptr;
+      }
+      this->ws_stop_completed_ = true;
+      continue;
+    }
+    if (handle != nullptr) {
+      const esp_err_t err = esp_websocket_client_stop(handle);
+      // ESP_FAIL also means the WS task already stopped on its own.
+      if (err != ESP_OK && !this->ws_task_finished_)
+        ESP_LOGE(TAG, "WebSocket stop failed before FINISH: %d", (int) err);
+    }
+    this->ws_stop_completed_ = this->ws_task_finished_.load();
+  }
+}
+
 void VaClient::mic_sender_loop_() {
   uint8_t packet[kMicTxPacketBytes];
   for (;;) {
@@ -476,12 +547,20 @@ void VaClient::fade_ring_tail_() {
 }
 
 void VaClient::connect_() {
+  if (!this->ws_task_finished_ || !this->ws_stop_completed_) {
+    this->reconnect_start_pending_ = true;
+    return;
+  }
   if (this->ws_handle_ != nullptr) {
     // Already initialised; just (re)start. A synchronous start failure must
     // reschedule — otherwise the reconnect chain stalls silently and the
     // device stays offline until a reboot.
+    this->ws_task_finished_ = false;
+    this->ws_stop_completed_ = false;
     esp_err_t err = esp_websocket_client_start(static_cast<esp_websocket_client_handle_t>(this->ws_handle_));
     if (err != ESP_OK) {
+      this->ws_task_finished_ = true;
+      this->ws_stop_completed_ = true;
       ESP_LOGE(TAG, "esp_websocket_client_start (restart) failed: %d — rescheduling", (int) err);
       this->schedule_reconnect_();
     }
@@ -495,7 +574,7 @@ void VaClient::connect_() {
   cfg.ping_interval_sec = 30;
   cfg.pingpong_timeout_sec = 60;
   cfg.disable_pingpong_discon = false;
-  cfg.network_timeout_ms = 30000;
+  cfg.network_timeout_ms = 2000;
 
   esp_websocket_client_handle_t handle = esp_websocket_client_init(&cfg);
   if (handle == nullptr) {
@@ -508,11 +587,20 @@ void VaClient::connect_() {
   esp_err_t err = esp_websocket_register_events(handle, WEBSOCKET_EVENT_ANY, va_ws_event_handler, this);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_websocket_register_events failed: %d", (int) err);
+    this->ws_stop_completed_ = false;
+    this->ws_destroy_requested_ = true;
+    xTaskNotifyGive(this->ws_teardown_task_);
+    this->schedule_reconnect_();
+    return;
   }
 
   ESP_LOGI(TAG, "Connecting to %s", this->url_.c_str());
+  this->ws_task_finished_ = false;
+  this->ws_stop_completed_ = false;
   err = esp_websocket_client_start(handle);
   if (err != ESP_OK) {
+    this->ws_task_finished_ = true;
+    this->ws_stop_completed_ = true;
     ESP_LOGE(TAG, "esp_websocket_client_start failed: %d", (int) err);
     this->schedule_reconnect_();
   }
@@ -559,6 +647,9 @@ void VaClient::schedule_reconnect_() {
 
 void VaClient::reset_connection_state_() {
   this->ws_connected_ = false;
+  this->server_barge_in_ = false;
+  this->server_hello_received_ = false;
+  this->server_barge_warning_logged_ = false;
   this->streaming_ = false;
   this->session_starting_ = false;
   this->clear_mic_tx_();
@@ -574,7 +665,9 @@ void VaClient::reset_connection_state_() {
   this->playback_priming_ = false;
   this->fade_in_pending_ = true;
   this->fade_out_pending_ = false;
+  this->thinking_tail_pending_ = false;
   this->reply_audio_done_ = false;
+  this->thinking_tail_pending_ = false;
   this->chain_prime_remaining_ = 0;
   this->suppress_followup_ = true;
   this->suppress_incoming_audio_ = false;
@@ -671,27 +764,48 @@ void VaClient::on_ws_event(int32_t event_id, void *event_data) {
     case WEBSOCKET_EVENT_DATA: {
       if (!this->ws_connected_ || this->control_channel_dirty_)
         break;
-      if (data == nullptr || data->data_ptr == nullptr || data->data_len <= 0)
+      if (data == nullptr || data->data_len < 0 || data->payload_offset < 0 ||
+          data->payload_len < 0 || (data->data_len > 0 && data->data_ptr == nullptr))
         break;
-      // op_code: 0x01 = text, 0x02 = binary, 0x00 = continuation of the prior
-      // frame. esp_websocket_client splits long messages, so we must track the
-      // type from the first chunk and feed continuations to the same handler.
-      uint8_t op = data->op_code;
-      if (op == 0x01) {
+      if (this->frame_connection_epoch_ != this->connection_epoch_) {
+        this->frame_connection_epoch_ = this->connection_epoch_;
+        this->text_assembler_.reset();
+        this->pcm_assembler_.reset();
         this->last_data_was_binary_ = false;
-        this->handle_text_(data->data_ptr, static_cast<size_t>(data->data_len));
-      } else if (op == 0x02) {
+      }
+      const size_t offset = static_cast<size_t>(data->payload_offset);
+      const size_t length = static_cast<size_t>(data->data_len);
+      const size_t payload_length = static_cast<size_t>(data->payload_len);
+      const bool continuation = data->op_code == 0x00;
+      if (data->op_code == 0x01 && offset == 0)
+        this->last_data_was_binary_ = false;
+      else if (data->op_code == 0x02 && offset == 0)
         this->last_data_was_binary_ = true;
-        this->handle_binary_(reinterpret_cast<const uint8_t *>(data->data_ptr),
-                             static_cast<size_t>(data->data_len));
-      } else if (op == 0x00) {
-        // Continuation. Route based on the type of the in-flight message.
-        if (this->last_data_was_binary_) {
-          this->handle_binary_(reinterpret_cast<const uint8_t *>(data->data_ptr),
-                               static_cast<size_t>(data->data_len));
-        } else {
-          this->handle_text_(data->data_ptr, static_cast<size_t>(data->data_len));
+      if (data->op_code != 0x01 && data->op_code != 0x02 && !continuation)
+        break;
+      if (this->last_data_was_binary_) {
+        uint32_t epoch;
+        portENTER_CRITICAL(&this->ring_mux_);
+        epoch = this->audio_ring_epoch_;
+        portEXIT_CRITICAL(&this->ring_mux_);
+        if (epoch != this->pcm_epoch_) {
+          this->pcm_epoch_ = epoch;
+          this->pcm_assembler_.reset();
         }
+        if (!this->pcm_assembler_.append(continuation,
+                reinterpret_cast<const uint8_t *>(data->data_ptr), length, offset,
+                payload_length, this->pcm_chunk_)) {
+          ESP_LOGW(TAG, "dropping out-of-order or interrupted PCM frame");
+        } else if (!this->pcm_chunk_.empty()) {
+          this->handle_binary_(this->pcm_chunk_.data(), this->pcm_chunk_.size());
+        }
+      } else {
+        const auto result = this->text_assembler_.append(
+            continuation, data->fin, data->data_ptr, length, offset, payload_length);
+        if (result == WsTextAssembler::Result::COMPLETE)
+          this->handle_text_(this->text_assembler_.data(), this->text_assembler_.size());
+        else if (result == WsTextAssembler::Result::DROPPED)
+          ESP_LOGW(TAG, "dropping oversized or out-of-order WS text message");
       }
       break;
     }
@@ -702,12 +816,12 @@ void VaClient::on_ws_event(int32_t event_id, void *event_data) {
         ESP_LOGW(TAG, "WS disconnected (event %d)", (int) event_id);
       }
       this->reset_connection_state_();
-      // Connection broke before the stability window elapsed — keep the
-      // failure counter and the fired flag. A flapping link won't earn
-      // a fresh chime.
-      this->schedule_reconnect_();
+      this->reconnect_requested_ = true;
       break;
     }
+    case WEBSOCKET_EVENT_FINISH:
+      this->ws_task_finished_ = true;
+      break;
     default:
       break;
   }
@@ -780,6 +894,14 @@ void VaClient::handle_text_(const char *data, size_t len) {
       ESP_LOGI(TAG, "hello: playback prebuffer (jitter buffer) = %u ms (%s)", (unsigned) v,
                v == 0 ? "disabled" : "cushion before playback");
     }
+    bool interrupt_response = false;
+    if (!parse_bool_after_key(msg, "\"interrupt_response\"", interrupt_response) &&
+        msg.find("\"interrupt_response\"") != std::string::npos)
+      ESP_LOGW(TAG, "hello: invalid interrupt_response; hands-free interrupt disabled");
+    this->server_barge_in_ = interrupt_response;
+    this->server_hello_received_ = true;
+    this->server_barge_warning_logged_ = false;
+    this->set_barge_in(this->barge_in_);
     return;
   }
 
@@ -825,6 +947,20 @@ void VaClient::handle_binary_(const uint8_t *data, size_t len) {
   // next "idle"/"listening" phase (see set_phase_).
   if (this->suppress_incoming_audio_)
     return;
+  if (this->reply_audio_done_ &&
+      static_cast<Phase>(this->current_phase_.load()) == Phase::REPLYING) {
+    bool empty;
+    portENTER_CRITICAL(&this->ring_mux_);
+    if (this->audio_fill_ > 0 && this->audio_fill_ <= kFadeSamples * sizeof(int16_t)) {
+      this->audio_head_ = this->audio_tail_ = this->audio_fill_ = 0;
+      ++this->audio_ring_epoch_;
+    }
+    empty = this->audio_fill_ == 0;
+    portEXIT_CRITICAL(&this->ring_mux_);
+    this->reply_audio_done_ = false;
+    if (empty)
+      this->fade_in_pending_ = true;
+  }
   const uint32_t now_ms = millis();
   if (this->turn_t_first_audio_out_ == 0 && this->turn_t_wake_ != 0) {
     this->turn_t_first_audio_out_ = now_ms;
@@ -889,7 +1025,7 @@ void VaClient::handle_binary_(const uint8_t *data, size_t len) {
     }
     this->clipped_samples_ += clipped;
     data = reinterpret_cast<const uint8_t *>(this->tts_buf_.data());
-    // len is unchanged (pairs * 2 == len rounded down; trailing odd byte ignored).
+    // WsFrameAssembler supplied only complete PCM16 samples.
     len = pairs * 2;
   }
   // Two-part write: from tail to end, then wrap to start.
@@ -1116,7 +1252,7 @@ void VaClient::set_phase_(const std::string &phase) {
     // our PSRAM ring so playback stops immediately instead of finishing the
     // now-cancelled sentence. We do NOT send a WS interrupt here — the backend
     // initiated this — we just stop local playback.
-    if (this->barge_in_ && this->audio_fill_snapshot_() > 0) {
+    if (this->effective_barge_in_() && this->audio_fill_snapshot_() > 0) {
       portENTER_CRITICAL(&this->ring_mux_);
       this->audio_head_ = 0;
       this->audio_tail_ = 0;
@@ -1134,6 +1270,31 @@ void VaClient::set_phase_(const std::string &phase) {
     this->cancel_timeout("va_no_speech");
     this->cancel_timeout("va_followup");
   } else if (phase == "thinking" || phase == "replying") {
+    if (phase == "thinking" && prev == Phase::REPLYING) {
+      portENTER_CRITICAL(&this->ring_mux_);
+      if (this->audio_fill_ > 0) {
+        if (!this->reply_audio_done_)
+          this->fade_ring_tail_();
+        this->thinking_tail_pending_ = true;
+      }
+      portEXIT_CRITICAL(&this->ring_mux_);
+      this->fade_out_pending_ = false;
+      this->reply_audio_done_ = true;
+    } else if (phase == "replying") {
+      bool old_reply_remaining = false;
+      if (prev == Phase::THINKING && this->thinking_tail_pending_) {
+        portENTER_CRITICAL(&this->ring_mux_);
+        if (this->audio_fill_ > 0 && this->audio_fill_ <= kFadeSamples * sizeof(int16_t)) {
+          this->audio_head_ = this->audio_tail_ = this->audio_fill_ = 0;
+          ++this->audio_ring_epoch_;
+        }
+        old_reply_remaining = this->audio_fill_ > 0;
+        portEXIT_CRITICAL(&this->ring_mux_);
+      }
+      this->thinking_tail_pending_ = false;
+      // Keep the previous reply drainable until the first new PCM arrives.
+      this->reply_audio_done_ = old_reply_remaining;
+    }
     // Gate the mic off only once the bot actually starts speaking (`replying`).
     // With handsfree barge-in we don't gate at all (the server VAD + XMOS AEC
     // arbitrate talk-over). Crucially we do NOT gate on `thinking`: semantic_vad
@@ -1142,7 +1303,7 @@ void VaClient::set_phase_(const std::string &phase) {
     // of audio → its input watchdog force-ends the turn with no transcript → the
     // turn hangs in thinking. No bot audio plays during thinking, so there's no
     // echo cost to keeping the mic open until the reply genuinely starts.
-    if (phase == "replying" && this->streaming_ && !this->barge_in_) {
+    if (phase == "replying" && this->streaming_ && !this->effective_barge_in_()) {
       ESP_LOGI(TAG, "phase=replying — mic streaming off");
       this->streaming_ = false;
       this->clear_mic_tx_();
@@ -1160,6 +1321,7 @@ void VaClient::set_phase_(const std::string &phase) {
     this->followup_armed_ = false;
     this->idle_emit_pending_ = false;  // new turn began, drop any held idle
   } else if (phase == "idle") {
+    this->thinking_tail_pending_ = false;
     this->playback_priming_ = false;
     this->fade_out_pending_ = true;
     this->reply_audio_done_ = true;
