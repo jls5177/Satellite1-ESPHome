@@ -172,25 +172,16 @@ Before updating your ESPHome Device Builder, verify that the latest Satellite1 f
 | `main`|![GitHub Release](https://img.shields.io/github/v/release/FutureProofHomes/Satellite1-ESPHome?filter=!*-beta*)|![Dynamic Regex Badge](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fraw.githubusercontent.com%2FFutureProofHomes%2FSatellite1-ESPHome%2Fmain%2Frequirements.txt&search=%5Eesphome%3D%3D(%5B0-9A-Za-z.%5C-%5D%2B)&replace=%241&label=ESPHome&flags=m)| 
 
 
-### Terminal Builds
-For the opt-in realtime WebSocket voice variant, build
-`config/satellite1.realtime.yaml` instead of `config/satellite1.yaml`.
-Set `va_url` to your LAN realtime bridge (default:
-`ws://homeassistant.local:8080/`) and, if necessary, `va_mic_channel`
-(0 or 1). The stock firmware/configuration is unchanged. This variant retains
-ESPHome OTA, the regular media player and Sendspin; it does **not** install
-the stock Home Assistant voice pipeline or the FPH HTTP update provider.
-The assistant has its own mixer lane and a separate restored voice-level
-control; muting the media player silences assistant audio as well.
-Timers are not synchronized with the realtime bridge (the internal ringing
-switch is only a compatibility stub). Hands-free interrupt is off by default
-because acoustic echo can trigger false barge-ins.
+### Realtime (OpenAI Realtime) variant
+The opt-in realtime firmware connects Satellite1 to an OpenAI Realtime add-on
+instead of the stock Home Assistant voice pipeline. It retains announcements,
+media, Sendspin and ESPHome OTA. See the
+[realtime setup and hardware bring-up guide](docs/realtime.md) for add-on
+installation, USB flashing, ESPHome Builder setup, controls, limitations and
+hands-free interruption. The stock firmware remains unchanged. Timers are
+coming with add-on ≥0.6.1-sat1.3 + firmware timer support.
 
-For dashboard builds, copy `config/satellite1.realtime.dashboard.yaml` and
-point `realtime_repo_url`/`realtime_repo_ref` at a fork/ref containing **both**
-the realtime packages and `esphome/components/va_client`. The default FPH URL
-is a placeholder until the realtime variant is published there. Dashboard
-builds require ESPHome 2026.8.1 or a compatible release.
+### Terminal Builds
 
 Create/activate environment by running from project root:
 ```bash
