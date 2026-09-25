@@ -173,8 +173,13 @@ cancellation is imperfect, so the assistant's own loud speech or music can
 cause false interrupts. Leave hands-free interrupt off until the
 [AEC qualification](#hardware-bring-up-checklist) passes.
 
-**Timers:** coming with add-on ≥0.6.1-sat1.3 + firmware timer support; do
-not rely on timer functionality in this preview.
+**Timers:** with add-on ≥0.6.1-sat1.4 (`enable_timers` on), ask to set,
+list or cancel timers (up to 8, 1 s–24 h). Timers live on the Satellite1:
+they keep running and ring even if the add-on disconnects, and are re-synced
+on reconnect, but are lost on reboot. The LED ring shows timer progress.
+Stop a ringing timer with the "stop" wake word, the center button, or the
+**Stop Timer Ringing** button in Home Assistant; ringing auto-stops after
+15 minutes. Timers are untested on hardware in this preview.
 
 ## Troubleshooting
 

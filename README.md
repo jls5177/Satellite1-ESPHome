@@ -178,8 +178,8 @@ instead of the stock Home Assistant voice pipeline. It retains announcements,
 media, Sendspin and ESPHome OTA. See the
 [realtime setup and hardware bring-up guide](docs/realtime.md) for add-on
 installation, USB flashing, ESPHome Builder setup, controls, limitations and
-hands-free interruption. The stock firmware remains unchanged. Timers are
-coming with add-on ≥0.6.1-sat1.3 + firmware timer support.
+hands-free interruption. The stock firmware remains unchanged. Device-local voice
+timers need add-on ≥0.6.1-sat1.4.
 
 ### Terminal Builds
 
