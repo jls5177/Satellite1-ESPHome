@@ -1,0 +1,453 @@
+substitutions:
+  voice_assist_idle_phase_id: '1'
+  voice_assist_waiting_for_command_phase_id: '2'
+  voice_assist_listening_for_command_phase_id: '3'
+  voice_assist_thinking_phase_id: '4'
+  voice_assist_replying_phase_id: '5'
+  voice_assist_not_ready_phase_id: '10'
+  voice_assist_error_phase_id: '11'
+
+globals:
+  - id: voice_assistant_phase
+    type: int
+    restore_value: no
+    initial_value: ${voice_assist_not_ready_phase_id}
+  - id: followup_window_open
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: followup_requested
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: media_ducked
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+microphone:
+  - platform: satellite1
+    id: sat1_mics
+    sample_rate: 48000
+    i2s_din_pin: GPIO15
+    bits_per_sample: 32bit
+    channel: stereo
+    pdm: false
+    adc_type: external
+    i2s_audio_id: i2s_shared
+
+va_client:
+  id: va
+  url: ${va_url}
+  microphone: sat1_mics
+  mic_channel: ${va_mic_channel}
+  barge_in: false
+  speaker: assistant_resampling_speaker
+  on_phase:
+    - lambda: |-
+        if (phase == "idle") {
+          if (id(voice_assistant_phase) == ${voice_assist_listening_for_command_phase_id} &&
+              id(followup_window_open)) {
+            id(followup_window_open) = false;
+            id(followup_requested) = false;
+          }
+          id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+        } else if (phase == "listening") {
+          if (id(voice_assistant_phase) == ${voice_assist_idle_phase_id} &&
+              id(va).turn_has_reply_audio() && !id(master_mute_switch).state)
+            id(followup_window_open) = true;
+          id(voice_assistant_phase) = ${voice_assist_listening_for_command_phase_id};
+        } else if (phase == "thinking") {
+          id(followup_window_open) = false;
+          id(followup_requested) = false;
+          id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
+        } else if (phase == "replying") {
+          id(followup_window_open) = false;
+          id(followup_requested) = false;
+          id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+        }
+    - script.execute: control_leds
+    - script.execute: reconcile_ducking
+    # Tool calls can return replying -> thinking while the previous reply is
+    # still audible; keep Stop armed until that turn is actually over.
+    - if:
+        condition:
+          lambda: return phase == "replying" || (phase == "thinking" && id(va).turn_has_reply_audio());
+        then:
+          - micro_wake_word.enable_model: stop
+          - lambda: id(stop).set_probability_cutoff(128);
+          - script.stop: followup_window_watchdog
+        else:
+          - if:
+              condition:
+                lambda: return phase == "thinking";
+              then:
+                - script.stop: followup_window_watchdog
+    - if:
+        condition:
+          lambda: return phase == "listening" && id(followup_window_open);
+        then:
+          - micro_wake_word.enable_model: stop
+          - lambda: id(stop).set_probability_cutoff(102);
+          - script.execute: followup_window_watchdog
+    - if:
+        condition:
+          lambda: return phase == "thinking" && !id(va).turn_has_reply_audio();
+        then:
+          - micro_wake_word.disable_model: stop
+    - if:
+        condition:
+          lambda: return phase == "idle";
+        then:
+          - if:
+              condition:
+                lambda: return id(followup_window_open);
+              then:
+                - micro_wake_word.enable_model: stop
+                - lambda: id(stop).set_probability_cutoff(102);
+                - script.execute: followup_window_watchdog
+              else:
+                - micro_wake_word.disable_model: stop
+                - script.stop: followup_window_watchdog
+    - if:
+        condition:
+          lambda: return phase == "idle" && id(va).is_connected();
+        then:
+          - script.execute: start_realtime_wake_word
+  on_repeated_failure:
+    - script.execute:
+        id: play_sound
+        priority: true
+        sound_file: "factory_reset_cancelled_sound"
+  on_followup_opened:
+    - lambda: |-
+        id(followup_window_open) = true;
+        id(followup_requested) = true;
+    - script.execute: reconcile_ducking
+    - if:
+        condition:
+          and:
+            - switch.is_off: master_mute_switch
+            - lambda: return id(va).is_connected();
+            - switch.is_on: wake_sound
+        then:
+          - script.execute:
+              id: play_sound
+              priority: true
+              sound_file: "wake_word_triggered_sound"
+          - script.wait: play_sound
+          - wait_until:
+              condition:
+                not:
+                  media_player.is_announcing: external_media_player
+              timeout: 2s
+          - delay: 800ms
+    # va_client defers the reply's idle event before firing this trigger.
+    # Yield once even without a chime so that idle cannot close the committed mic.
+    - delay: 1ms
+    - if:
+        condition:
+          and:
+            - switch.is_off: master_mute_switch
+            - lambda: return id(va).is_connected() && id(followup_window_open);
+        then:
+          - lambda: id(va).commit_followup_mic();
+          - lambda: id(voice_assistant_phase) = ${voice_assist_listening_for_command_phase_id};
+          - micro_wake_word.enable_model: stop
+          - lambda: id(stop).set_probability_cutoff(102);
+          - script.execute: control_leds
+          - script.execute: reconcile_ducking
+          - script.execute: followup_window_watchdog
+        else:
+          - lambda: |-
+              id(followup_window_open) = false;
+              id(followup_requested) = false;
+          - script.execute: reconcile_ducking
+
+micro_wake_word:
+  id: mww
+  models:
+    - model: https://fph-firmware-assets.s3.us-east-1.amazonaws.com/wake-word/hey_jarvis.json
+      id: hey_jarvis
+    - model: https://fph-firmware-assets.s3.us-east-1.amazonaws.com/wake-word/okay_nabu.json
+      id: okay_nabu
+    - model: https://fph-firmware-assets.s3.us-east-1.amazonaws.com/wake-word/stop.json
+      id: stop
+      internal: true
+      probability_cutoff: 0.4
+  vad:
+    probability_cutoff: 0.3
+  microphone:
+    microphone: sat1_mics
+    channels: 1
+    gain_factor: 6
+  stop_after_detection: false
+  on_wake_word_detected:
+    - if:
+        condition:
+          switch.is_off: master_mute_switch
+        then:
+          - if:
+              condition:
+                switch.is_on: timer_ringing
+              then:
+                - switch.turn_off: timer_ringing
+              else:
+                - if:
+                    condition:
+                      lambda: return wake_word == "Stop" || wake_word == "stop";
+                    then:
+                      - if:
+                          condition:
+                            lambda: |-
+                              return id(va).turn_has_reply_audio() &&
+                                     (id(followup_window_open) ||
+                                      (id(voice_assistant_phase) != ${voice_assist_idle_phase_id} &&
+                                       id(voice_assistant_phase) != ${voice_assist_not_ready_phase_id}));
+                          then:
+                            - script.execute: interrupt_realtime_session
+                    else:
+                      - if:
+                          condition:
+                            lambda: return id(va).is_connected();
+                          then:
+                            - if:
+                                condition:
+                                  lambda: return id(voice_assistant_phase) == ${voice_assist_replying_phase_id};
+                                then:
+                                  - script.execute: interrupt_realtime_session
+                            - lambda: |-
+                                id(followup_window_open) = false;
+                                id(followup_requested) = false;
+                            - script.stop: followup_window_watchdog
+                            - speaker.stop: assistant_resampling_speaker
+                            - if:
+                                condition:
+                                  switch.is_on: wake_sound
+                                then:
+                                  - script.execute:
+                                      id: play_sound
+                                      priority: true
+                                      sound_file: "wake_word_triggered_sound"
+                                  - script.wait: play_sound
+                                  - wait_until:
+                                      condition:
+                                        not:
+                                          media_player.is_announcing: external_media_player
+                                      timeout: 2s
+                                  - delay: !lambda return id(va).get_wake_open_delay_ms();
+                            - if:
+                                condition:
+                                  and:
+                                    - switch.is_off: master_mute_switch
+                                    - lambda: return id(va).is_connected();
+                                then:
+                                  - lambda: id(va).start_session();
+                                  - micro_wake_word.disable_model: stop
+                                  - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
+                                  - script.execute: control_leds
+                                  - script.execute: reconcile_ducking
+                          else:
+                            - script.execute:
+                                id: play_sound
+                                priority: true
+                                sound_file: "factory_reset_cancelled_sound"
+
+number:
+  - platform: template
+    id: assistant_voice_level
+    name: "Assistant voice level"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 1.0
+    min_value: 0.3
+    max_value: 1.0
+    step: 0.05
+    on_value:
+      - script.execute: apply_assistant_voice_level
+
+switch:
+  - platform: template
+    id: hands_free_interrupt
+    name: "Hands-free interrupt"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - lambda: id(va).set_barge_in(true);
+    on_turn_off:
+      - lambda: id(va).set_barge_in(false);
+  - platform: template
+    id: timer_ringing
+    internal: true
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - micro_wake_word.enable_model: stop
+      - script.execute: reconcile_ducking
+      - script.execute: control_leds
+    on_turn_off:
+      - micro_wake_word.disable_model: stop
+      - media_player.stop:
+          id: external_media_player
+          announcement: true
+      - script.execute: reconcile_ducking
+      - script.execute: control_leds
+
+script:
+  - id: start_realtime_wake_word
+    mode: restart
+    then:
+      - wait_until:
+          lambda: return id(xmos_audio_ready) && !id(xflash).in_progress();
+      - if:
+          condition:
+            lambda: return !id(mww).is_running();
+          then:
+            - micro_wake_word.start:
+      - if:
+          condition:
+            lambda: |-
+              return id(voice_assistant_phase) != ${voice_assist_replying_phase_id} &&
+                     !(id(voice_assistant_phase) == ${voice_assist_thinking_phase_id} &&
+                       id(va).turn_has_reply_audio()) &&
+                     !id(followup_window_open);
+          then:
+            - micro_wake_word.disable_model: stop
+      - script.execute: control_leds
+  - id: interrupt_realtime_session
+    then:
+      - lambda: id(va).send_interrupt();
+      - speaker.stop: assistant_resampling_speaker
+      - lambda: |-
+          id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+          id(followup_window_open) = false;
+          id(followup_requested) = false;
+      - script.stop: followup_window_watchdog
+      - micro_wake_word.disable_model: stop
+      - script.execute: control_leds
+      - script.execute: reconcile_ducking
+  - id: followup_window_watchdog
+    mode: restart
+    then:
+      # Request-driven windows expire after 10s without a client idle
+      # notification; automatic windows can be configured for up to 60s.
+      - delay: !lambda 'return id(followup_requested) ? 12000 : 65000;'
+      - if:
+          condition:
+            lambda: return id(followup_window_open);
+          then:
+            - lambda: |-
+                id(followup_window_open) = false;
+                id(followup_requested) = false;
+                if (id(voice_assistant_phase) == ${voice_assist_listening_for_command_phase_id})
+                  id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+            - micro_wake_word.disable_model: stop
+            - script.execute: control_leds
+            - script.execute: reconcile_ducking
+  - id: apply_assistant_voice_level
+    then:
+      - lambda: |-
+          id(va).set_volume(id(external_media_player).is_muted()
+                                ? 0.0f : id(assistant_voice_level).state);
+  - id: reconcile_ducking
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return (id(voice_assistant_phase) != ${voice_assist_idle_phase_id} &&
+                      id(voice_assistant_phase) != ${voice_assist_not_ready_phase_id}) ||
+                     id(followup_window_open) ||
+                     id(assistant_resampling_speaker).has_buffered_data() ||
+                     id(external_media_player).state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING ||
+                     id(timer_ringing).state;
+          then:
+            - if:
+                condition:
+                  lambda: return !id(media_ducked);
+                then:
+                  - lambda: id(media_ducked) = true;
+                  - mixer_speaker.apply_ducking:
+                      id: media_mixing_input
+                      decibel_reduction: 20
+                      duration: 0s
+          else:
+            - if:
+                condition:
+                  lambda: return id(media_ducked);
+                then:
+                  - lambda: id(media_ducked) = false;
+                  - mixer_speaker.apply_ducking:
+                      id: media_mixing_input
+                      decibel_reduction: 0
+                      duration: 1s
+
+interval:
+  - interval: 250ms
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(media_ducked) ||
+                     (id(voice_assistant_phase) != ${voice_assist_idle_phase_id} &&
+                      id(voice_assistant_phase) != ${voice_assist_not_ready_phase_id}) ||
+                     id(followup_window_open) ||
+                     id(assistant_resampling_speaker).has_buffered_data() ||
+                     id(external_media_player).state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING ||
+                     id(timer_ringing).state;
+          then:
+            - script.execute: reconcile_ducking
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            lambda: return id(va).is_connected() && id(init_in_progress);
+          then:
+            - lambda: id(init_in_progress) = false;
+            - script.execute: control_leds
+      - if:
+          condition:
+            lambda: return id(va).is_connected() && id(voice_assistant_phase) == ${voice_assist_not_ready_phase_id};
+          then:
+            - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+            - script.execute: control_leds
+            - script.execute: apply_assistant_voice_level
+            - lambda: id(va).set_barge_in(id(hands_free_interrupt).state);
+      - if:
+          condition:
+            lambda: return !id(va).is_connected() && id(voice_assistant_phase) != ${voice_assist_not_ready_phase_id};
+          then:
+            - lambda: |-
+                id(voice_assistant_phase) = ${voice_assist_not_ready_phase_id};
+                id(followup_window_open) = false;
+                id(followup_requested) = false;
+            - script.stop: followup_window_watchdog
+            - micro_wake_word.disable_model: stop
+            - script.execute: control_leds
+            - script.execute: reconcile_ducking
+
+select:
+  - platform: template
+    id: mww_sensitivity_select
+    name: "Wake word sensitivity"
+    optimistic: true
+    initial_option: Slightly sensitive
+    restore_value: true
+    entity_category: config
+    options:
+      - Slightly sensitive
+      - Moderately sensitive
+      - Very sensitive
+    on_value:
+      lambda: |-
+        if (x == "Slightly sensitive") {
+          id(okay_nabu).set_probability_cutoff(217);
+          id(hey_jarvis).set_probability_cutoff(247);
+        } else if (x == "Moderately sensitive") {
+          id(okay_nabu).set_probability_cutoff(176);
+          id(hey_jarvis).set_probability_cutoff(235);
+        } else if (x == "Very sensitive") {
+          id(okay_nabu).set_probability_cutoff(143);
+          id(hey_jarvis).set_probability_cutoff(212);
+        }

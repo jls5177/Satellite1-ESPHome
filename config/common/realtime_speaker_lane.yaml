@@ -1,0 +1,11 @@
+# Extend the stock mixer without changing its announcement or media inputs.
+speaker:
+  - id: !extend mixing_speaker
+    source_speakers:
+      - id: assistant_mixing_input
+        timeout: never
+  - platform: resampler
+    id: assistant_resampling_speaker
+    output_speaker: assistant_mixing_input
+    sample_rate: 48000
+    bits_per_sample: 16
