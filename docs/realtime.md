@@ -258,7 +258,11 @@ Stop a ringing timer with the "stop" wake word, the center button, or the
    powers the Class-D stage down after 50 ms of digital silence and back up
    when audio returns. The realtime variant turns it off by default; the
    **Speaker noise gate** config switch re-enables it (slightly lower idle
-   power, but clicks return).
+   power, but clicks return). Clicks *between sentences* come from the
+   add-on's stream pausing. The firmware fades out only when its estimate of
+   the queued playback runs low, and fades the next audio back in. If
+   `ws audio gap: … ~N ms queued downstream` shows N near 0, raise the
+   add-on's `playback_prebuffer_ms`.
 8. **Boot loop or no logs over Wi-Fi:** The HAT's USB-C port only supplies
    power. Connect the Core board's **CORE/ESP32** USB-C port instead; it
    exposes the ESP32-S3 USB-Serial/JTAG console used by `logger`. Read it

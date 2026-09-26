@@ -10,6 +10,7 @@
 #include <esp_websocket_client.h>
 #include <esp_event.h>
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
 
 namespace esphome {
 namespace va_client {
@@ -218,14 +219,21 @@ void VaClient::loop() {
   // Drain the audio ring buffer into the speaker. speaker.play() accepts
   // only what fits in its own ring (returns the count actually queued).
   if (this->speaker_ != nullptr && this->is_audio_ready()) {
-    const bool speaker_dry = !this->speaker_->has_buffered_data();
+    // has_buffered_data() ignores the I2S speaker's 500 ms buffer, so it reports
+    // "dry" while plenty is still queued. Use the fed-vs-elapsed estimate to fade
+    // the held tail out only when playback would really run out.
+    if (this->speaker_->is_stopped())  // e.g. speaker.stop on interrupt
+      this->playback_clock_.reset();
+    const uint32_t downstream_us = this->playback_clock_.remaining_us(esp_timer_get_time());
+    this->downstream_queued_ms_ = downstream_us / 1000;
+    const bool downstream_low = downstream_us < kStarveGuardMs * 1000u;
     // Snapshot ring state under the lock — head/tail/fill are all
     // mutated from the WS task on the other core.
     portENTER_CRITICAL(&this->ring_mux_);
     const uint32_t now_ms = millis();
     const bool starved_tail = !this->reply_audio_done_ &&
         release_fade_tail(this->audio_fill_, kFadeSamples * sizeof(int16_t),
-                          false, speaker_dry, now_ms, this->last_binary_ms_, kWsGapWarnMs);
+                          false, downstream_low, now_ms, this->last_binary_ms_, kStarveGapMs);
     if (starved_tail) {
       this->reply_audio_done_ = true;
       this->fade_out_pending_ = true;
@@ -264,6 +272,7 @@ void VaClient::loop() {
                                     this->last_fed_ms_ == 0 ||
                                     (now_ms - this->last_fed_ms_) > kChainColdMs;
         if (this->chain_prime_remaining_ == 0 && resampler_cold) {
+          this->playback_clock_.reset();
           this->chain_prime_remaining_ =
               (size_t) kChainPrimeMs * (kPlaybackSampleRate / 1000) * 2;  // ms→bytes (mono 16-bit)
           ESP_LOGD(TAG, "resampler cold — priming %u bytes of silence before reply",
@@ -274,6 +283,7 @@ void VaClient::loop() {
           size_t want = std::min(this->chain_prime_remaining_.load(), sizeof(kSilence));
           size_t fed = this->speaker_->play(kSilence, want);
           if (fed > 0) {
+            this->playback_clock_.fed(esp_timer_get_time(), fed, kPlaybackSampleRate * 2);
             size_t remaining = this->chain_prime_remaining_.load();
             while (remaining > 0 && !this->chain_prime_remaining_.compare_exchange_weak(
                 remaining, remaining > fed ? remaining - fed : 0)) {}
@@ -333,6 +343,7 @@ void VaClient::loop() {
       size_t accepted = this->speaker_->play(this->audio_drain_buf_, contiguous);
       if (accepted > 0) {
         this->last_fed_ms_ = millis();  // keep the chain "warm" for cold-detection
+        this->playback_clock_.fed(esp_timer_get_time(), accepted, kPlaybackSampleRate * 2);
         portENTER_CRITICAL(&this->ring_mux_);
         if (this->audio_ring_epoch_ == epoch && accepted <= this->audio_fill_) {
           this->audio_head_ = (this->audio_head_ + accepted) % kAudioBufBytes;
@@ -1080,20 +1091,6 @@ void VaClient::handle_binary_(const uint8_t *data, size_t len) {
   // next "idle"/"listening" phase (see set_phase_).
   if (this->suppress_incoming_audio_)
     return;
-  if (this->reply_audio_done_ &&
-      static_cast<Phase>(this->current_phase_.load()) == Phase::REPLYING) {
-    bool empty;
-    portENTER_CRITICAL(&this->ring_mux_);
-    if (this->audio_fill_ > 0 && this->audio_fill_ <= kFadeSamples * sizeof(int16_t)) {
-      this->audio_head_ = this->audio_tail_ = this->audio_fill_ = 0;
-      ++this->audio_ring_epoch_;
-    }
-    empty = this->audio_fill_ == 0;
-    portEXIT_CRITICAL(&this->ring_mux_);
-    this->reply_audio_done_ = false;
-    if (empty)
-      this->fade_in_pending_ = true;
-  }
   const uint32_t now_ms = millis();
   if (this->turn_t_first_audio_out_ == 0 && this->turn_t_wake_ != 0) {
     this->turn_t_first_audio_out_ = now_ms;
@@ -1108,8 +1105,9 @@ void VaClient::handle_binary_(const uint8_t *data, size_t len) {
     if (gap > kWsGapWarnMs) {
       this->ws_gap_count_++;
       if (gap > this->ws_gap_max_ms_) this->ws_gap_max_ms_ = gap;
-      ESP_LOGW(TAG, "ws audio gap: %u ms (ring fill %u bytes)",
-               (unsigned) gap, (unsigned) this->audio_fill_snapshot_());
+      ESP_LOGW(TAG, "ws audio gap: %u ms (ring fill %u bytes, ~%u ms queued downstream)",
+               (unsigned) gap, (unsigned) this->audio_fill_snapshot_(),
+               (unsigned) this->downstream_queued_ms_.load());
     }
   }
   this->last_binary_ms_ = now_ms;
@@ -1174,6 +1172,21 @@ void VaClient::handle_binary_(const uint8_t *data, size_t len) {
     portEXIT_CRITICAL(&this->ring_mux_);
     return;
   }
+  // Audio resuming after a released (faded) tail. Decided under the same lock
+  // as loop()'s starvation check and the append, so the tail can't be faded
+  // again in between. If loop() has not faded the tail yet, cancel that fade:
+  // the old tail runs straight into this audio. Otherwise the ring ends (or
+  // ended) at zero, so fade the new audio in. Fading the ring head would hit
+  // the old tail if it is still queued, and dropping it would cut it off.
+  if (this->reply_audio_done_ &&
+      static_cast<Phase>(this->current_phase_.load()) == Phase::REPLYING) {
+    if (!this->fade_out_pending_.exchange(false))
+      this->resume_fade_pos_ = 0;
+    this->reply_audio_done_ = false;
+  }
+  if (this->resume_fade_pos_ < kFadeSamples && len >= 2)
+    this->resume_fade_pos_ = fade_in_samples(this->tts_buf_.data(), len / 2, kFadeSamples,
+                                             this->resume_fade_pos_);
   const bool was_empty = (this->audio_fill_ == 0);
   size_t tail = this->audio_tail_;
   size_t first = std::min(len, kAudioBufBytes - tail);

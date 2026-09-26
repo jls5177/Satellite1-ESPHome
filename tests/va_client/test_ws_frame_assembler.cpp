@@ -12,6 +12,41 @@ using esphome::va_client::WsTextAssembler;
 using esphome::va_client::WsMessageType;
 using esphome::va_client::classify_ws_message;
 using esphome::va_client::release_fade_tail;
+using esphome::va_client::PlaybackClock;
+using esphome::va_client::fade_in_samples;
+
+static void test_playback_clock() {
+  PlaybackClock clock;
+  assert(clock.remaining_us(1000) == 0);
+  clock.fed(1000, 4800, 48000);  // 100 ms
+  assert(clock.remaining_us(1000) == 100000);
+  assert(clock.remaining_us(51000) == 50000);
+  clock.fed(51000, 960, 48000);  // queued: extends from the current end
+  assert(clock.remaining_us(51000) == 70000);
+  assert(clock.remaining_us(200000) == 0);
+  clock.fed(300000, 480, 48000);  // after an underrun, restarts from now
+  assert(clock.remaining_us(300000) == 10000);
+  const int64_t later = int64_t{1} << 33;  // past a 32-bit micros() wrap
+  assert(clock.remaining_us(later) == 0);
+  clock.fed(later, 4800, 48000);
+  assert(clock.remaining_us(later + 20000) == 80000);
+  clock.reset();
+  assert(clock.remaining_us(10000) == 0);
+}
+
+static void test_fade_in_samples() {
+  std::vector<int16_t> s(8, 1000);
+  assert(fade_in_samples(s.data(), s.size(), 4, 0) == 4);
+  assert(s[0] == 0 && s[1] == 250 && s[3] == 750 && s[4] == 1000 && s[7] == 1000);
+  // A fade continues across fragments, including one-sample ones.
+  std::vector<int16_t> a(1, 1000), b(6, 1000);
+  size_t pos = fade_in_samples(a.data(), a.size(), 4, 0);
+  assert(pos == 1 && a[0] == 0);
+  pos = fade_in_samples(b.data(), b.size(), 4, pos);
+  assert(pos == 4 && b[0] == 250 && b[2] == 750 && b[3] == 1000);
+  // Inactive fade leaves samples untouched.
+  assert(fade_in_samples(b.data(), b.size(), 4, 4) == 4 && b[0] == 250);
+}
 
 static void test_pcm_split_at_every_byte() {
   const std::array<uint8_t, 7> bytes{{1, 2, 3, 4, 5, 6, 7}};
@@ -123,6 +158,8 @@ static void test_tail_starvation() {
 }
 
 int main() {
+  test_playback_clock();
+  test_fade_in_samples();
   test_pcm_split_at_every_byte();
   test_pcm_continuations_and_flush();
   test_text_split_and_fragmented();

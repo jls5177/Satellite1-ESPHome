@@ -159,6 +159,40 @@ class Pcm16FrameAssembler {
   bool active_{false};
 };
 
+// Estimates how much audio is still queued downstream (resampler, mixer and
+// I2S buffers) from what was fed and the wall clock. Downstream playback
+// starts no earlier than the feed, so the real queue is never shorter.
+class PlaybackClock {
+ public:
+  void reset() { this->valid_ = false; }
+  void fed(int64_t now_us, size_t bytes, uint32_t bytes_per_second) {
+    if (this->remaining_us(now_us) == 0) {
+      this->until_us_ = now_us;
+      this->valid_ = true;
+    }
+    this->until_us_ += static_cast<int64_t>(static_cast<uint64_t>(bytes) * 1000000u / bytes_per_second);
+  }
+  uint32_t remaining_us(int64_t now_us) const {
+    if (!this->valid_ || this->until_us_ <= now_us)
+      return 0;
+    return static_cast<uint32_t>(this->until_us_ - now_us);
+  }
+
+ private:
+  int64_t until_us_{0};
+  bool valid_{false};
+};
+
+// Continues a linear fade-in of fade_samples samples that is already at
+// position pos (samples faded so far), so a fade can span several chunks.
+// Returns the new position; pos >= fade_samples means no fade is active.
+inline size_t fade_in_samples(int16_t *samples, size_t count, size_t fade_samples, size_t pos) {
+  for (size_t i = 0; i < count && pos < fade_samples; i++, pos++)
+    samples[i] = static_cast<int16_t>((static_cast<int32_t>(samples[i]) * static_cast<int32_t>(pos)) /
+                                      static_cast<int32_t>(fade_samples));
+  return pos;
+}
+
 inline bool release_fade_tail(size_t bytes, size_t fade_bytes, bool done, bool speaker_dry,
                               uint32_t now_ms, uint32_t last_audio_ms,
                               uint32_t starvation_ms) {

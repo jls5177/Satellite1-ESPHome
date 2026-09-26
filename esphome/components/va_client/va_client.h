@@ -531,6 +531,14 @@ class VaClient : public Component {
   std::atomic<uint32_t> clipped_samples_{0};    // clipped samples in this turn
   std::atomic<bool> underrun_logged_this_turn_{false};
   static constexpr uint32_t kWsGapWarnMs = 80;  // > ~3× normal 20 ms frame
+  // Fade the held tail out once the downstream estimate drops below this and
+  // no audio has arrived for kStarveGapMs (about one frame).
+  static constexpr uint32_t kStarveGuardMs = 40;
+  static constexpr uint32_t kStarveGapMs = 20;
+  PlaybackClock playback_clock_;  // loop() only
+  std::atomic<uint32_t> downstream_queued_ms_{0};  // snapshot for WS-task logs
+  // Resume fade-in progress in samples (>= kFadeSamples: none). WS task, under ring_mux_.
+  size_t resume_fade_pos_{kFadeSamples};
 };
 
 }  // namespace va_client
