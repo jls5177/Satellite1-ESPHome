@@ -77,8 +77,8 @@ For a local build, use `config/satellite1.realtime.yaml`, **not**
 reachable LAN address, for example `ws://192.168.1.20:8080/` (the default is
 `ws://homeassistant.local:8080/`). If needed, select microphone channel
 `va_mic_channel` (`0` or `1`). Do not put the OpenAI key in this file.
-Provide the ESPHome API encryption key and any network credentials required
-by your build without committing secrets to the fork.
+No secrets file is needed: Wi-Fi comes from Improv provisioning and the
+ESPHome API encryption key is provisioned by Home Assistant.
 
 From the repository root, with the project's ESPHome environment installed:
 
@@ -94,27 +94,59 @@ docker run --rm -v "$PWD":/config -w /config \
   ghcr.io/esphome/esphome:2026.8.1 compile config/satellite1.realtime.yaml
 ```
 
-For the **first USB flash**, open [web.esphome.io](https://web.esphome.io/)
+**Which flash method?** A Satellite1 already running stock FPH firmware
+accepts **ESPHome OTA over Wi-Fi** (the stock build includes `ota: esphome`),
+so USB is not required. Wi-Fi credentials (from Improv) and the Home
+Assistant-provisioned API key are kept across the update, so the device
+stays in Home Assistant under the same name. Use USB only for a blank or
+bricked device.
+
+**OTA from a Docker build on the LAN** (replace the IP with the device's):
+
+```sh
+docker run --rm -v "$PWD":/config -w /config \
+  ghcr.io/esphome/esphome:2026.8.1 upload config/satellite1.realtime.yaml \
+  --device 192.168.1.50
+```
+
+**USB (blank or bricked devices):** open [web.esphome.io](https://web.esphome.io/)
 in a compatible browser on the machine connected to Satellite1, connect over
 USB, and install the locally compiled factory image at
 `config/.esphome/build/satellite1/build/firmware.factory.bin`. Alternatively,
 use host-installed `esptool` to write that factory image at address `0x0`
-on the ESP32-S3, or run `esphome run config/satellite1.realtime.yaml` with
-USB serial access on a supported host. **Docker Desktop on macOS cannot
-pass USB serial through to the ESPHome container**: use Docker to compile,
-then use the browser or host `esptool` to flash. Do not assume that `esphome
-run` *inside Docker on macOS* can perform the USB step.
+on the ESP32-S3. **Docker Desktop on macOS cannot pass USB serial through to
+the ESPHome container**, so use Docker to compile and the browser or host
+`esptool` to flash.
 
 For a new device, provision Wi-Fi through Home Assistant's Improv BLE flow
 and authorize provisioning with the action button (or use your existing Wi-Fi
 configuration). Wait for Wi-Fi and the ESPHome API to connect, then add/adopt
 the device in Home Assistant. The local build can automatically flash the
 embedded XMOS firmware on first boot when needed; let that finish before
-testing audio. After the first USB flash, updates can use **ESPHome OTA**
-(`esphome run` on the LAN or ESPHome Device Builder). Keep a USB recovery
-path available.
+testing audio. Keep a USB recovery path available.
 
-### ESPHome Device Builder / dashboard stub
+### ESPHome Device Builder with local files (no fork needed)
+
+To build and install from Home Assistant's ESPHome Device Builder app using
+this checkout, stage the files and copy them into the Builder's config
+directory (`/config/esphome` on the HA host, via the Samba or SSH app):
+
+```sh
+scripts/stage_realtime_builder.sh /tmp/sat1-builder satellite1-a1b2c3 ws://192.168.1.20:8080/
+```
+
+Use your device's existing name (as shown in Builder/Home Assistant) so the
+update replaces it in place. The script writes a small device YAML named
+after the device, the two `satellite1.realtime*.yaml` files, `common/` and
+`components/`. **Back up the device's existing YAML first**; the new one
+replaces it. If that old YAML set explicit `api`, `ota` or `wifi` keys, copy
+them into the new one. Then in Builder choose the device → **Install** →
+**Wirelessly**. Builder must be ESPHome ≥2026.7.0; the first build on a
+low-power HA host can take a long time. `satellite1.realtime.yaml` and
+`satellite1.realtime.base.yaml` also appear as devices in Builder; ignore them.
+To go back to stock, restore the old YAML and install it wirelessly.
+
+### ESPHome Device Builder / dashboard stub (published fork)
 
 For Builder-managed OTA updates, copy
 `config/satellite1.realtime.dashboard.yaml` into your ESPHome Device Builder
@@ -124,7 +156,7 @@ device YAML. Set `realtime_repo_url` to your **firmware fork** and
 a placeholder until publication. Set `va_url` to your reachable add-on
 WebSocket URL (and `va_mic_channel` if necessary), then supply the device's
 normal Wi-Fi/API settings or adopt its existing keys in Builder. Compile and
-install by OTA after the initial USB flash. Dashboard builds wait for a
+install wirelessly. Dashboard builds wait for a
 responding XMOS rather than automatically flashing it; the dashboard exposes
 an **XMOS Flash Embedded FW** button for manual firmware flashing.
 
