@@ -15,6 +15,8 @@ using esphome::va_client::release_fade_tail;
 using esphome::va_client::PlaybackClock;
 using esphome::va_client::fade_in_samples;
 using esphome::va_client::scale_sample;
+using esphome::va_client::barge_in_trim;
+using esphome::va_client::barge_in_mic_allowed;
 
 static void test_scale_sample_negative() {
   const size_t num = 238, den = 239;  // size_t operands, as in the ring fades
@@ -168,6 +170,33 @@ static void test_tail_starvation() {
   assert(release_fade_tail(480, fade, false, true, 20, UINT32_MAX - 70, 80));
 }
 
+static void test_barge_in_trim() {
+  constexpr size_t fade_bytes = 480;
+  assert(barge_in_trim(0, fade_bytes) == 0);
+  assert(barge_in_trim(2, fade_bytes) == 2);
+  assert(barge_in_trim(fade_bytes - 2, fade_bytes) == fade_bytes - 2);
+  assert(barge_in_trim(fade_bytes, fade_bytes) == fade_bytes);
+  assert(barge_in_trim(fade_bytes + 2, fade_bytes) == fade_bytes);
+  assert(barge_in_trim(2000000, fade_bytes) == fade_bytes);
+  assert(barge_in_trim(100, 0) == 0);
+}
+
+static void test_barge_in_mic_holdoff() {
+  assert(barge_in_mic_allowed(false, true, 0, 1000, 400));
+  assert(barge_in_mic_allowed(true, false, 0, 1000, 400));
+  assert(!barge_in_mic_allowed(true, true, 0, 1000, 400));
+  assert(!barge_in_mic_allowed(true, true, 0, 1000, 0));
+  assert(!barge_in_mic_allowed(true, true, 1000, 999, 0));
+  assert(!barge_in_mic_allowed(true, true, 1000, 999, 400));
+  assert(!barge_in_mic_allowed(true, true, 1000, 1399, 400));
+  assert(barge_in_mic_allowed(true, true, 1000, 1400, 400));
+  assert(barge_in_mic_allowed(true, true, 1000, 1000, 0));
+  assert(!barge_in_mic_allowed(true, true, 1000, 2999, 2000));
+  assert(barge_in_mic_allowed(true, true, 1000, 3000, 2000));
+  assert(!barge_in_mic_allowed(true, true, UINT32_MAX - 100, 298, 400));
+  assert(barge_in_mic_allowed(true, true, UINT32_MAX - 100, 299, 400));
+}
+
 int main() {
   test_playback_clock();
   test_scale_sample_negative();
@@ -178,5 +207,7 @@ int main() {
   test_message_types();
   test_text_bounds_and_out_of_order();
   test_tail_starvation();
+  test_barge_in_trim();
+  test_barge_in_mic_holdoff();
   return 0;
 }

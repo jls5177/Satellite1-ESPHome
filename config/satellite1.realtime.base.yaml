@@ -18,6 +18,7 @@ substitutions:
   xmos_auto_flash_on_boot: "false"
   va_url: "ws://homeassistant.local:8080/"
   va_mic_channel: "0"
+  i2s_buffer_duration: "500ms"
 
 globals:
   # Global initialisation variable. Initialized to true and set to false once everything is connected. Only used to have a smooth "plugging" experience

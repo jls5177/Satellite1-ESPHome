@@ -313,6 +313,19 @@ number:
     step: 0.5
     on_value:
       - lambda: id(va).set_mic_gain(x);
+  - platform: template
+    id: barge_in_holdoff
+    name: "Barge-in holdoff"
+    entity_category: config
+    unit_of_measurement: ms
+    optimistic: true
+    restore_value: true
+    initial_value: 400
+    min_value: 0
+    max_value: 2000
+    step: 50
+    on_value:
+      - lambda: id(va).set_barge_in_holdoff_ms(x);
 
 switch:
   # Hands-free interrupt also requires interrupt_response enabled in the
@@ -454,6 +467,7 @@ interval:
             - script.execute: control_leds
             - script.execute: apply_assistant_voice_level
             - lambda: id(va).set_barge_in(id(hands_free_interrupt).state);
+            - lambda: id(va).set_barge_in_holdoff_ms(id(barge_in_holdoff).state);
       - if:
           condition:
             lambda: return !id(va).is_connected() && id(voice_assistant_phase) != ${voice_assist_not_ready_phase_id};

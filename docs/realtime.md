@@ -180,6 +180,7 @@ Useful Home Assistant controls from this firmware:
 | Entity name | Purpose |
 | --- | --- |
 | **Hands-free interrupt** | Lets speech interrupt a reply; off by default. Requires the add-on option below too. |
+| **Barge-in holdoff** | Mic-transmit pause after reply playback starts (0–2000 ms; default 400 ms). |
 | **Assistant voice level** | Assistant-only output level (0.3–1.0, default 1.0). |
 | **Mute Microphones** | Software mic mute; hardware mute takes precedence. Muting stops the current assistant session and closes follow-up listening. |
 | **Wake sound** | Toggle the wake chime. |
@@ -200,12 +201,21 @@ media-player **mute** applies to both.
 
 After initial playback works, set `interrupt_response: true` in the add-on
 and restart it, **then** turn on the Satellite1 **Hands-free interrupt**
-switch. Both must be enabled: the firmware requires server consent as well
-as its own switch. When enabled, the mic continues streaming while the
-assistant thinks/speaks; speech can interrupt a reply. XMOS acoustic echo
-cancellation is imperfect, so the assistant's own loud speech or music can
-cause false interrupts. Leave hands-free interrupt off until the
-[AEC qualification](#hardware-bring-up-checklist) passes.
+switch. Both controls must be on: if only the device switch is on, look for
+`hands-free interrupt is on but add-on interrupt_response is off` in the log.
+**Barge-in holdoff** (default 400 ms) suppresses mic transmission until
+that long after the first real reply audio is fed to the speaker; it resets
+for each reply, including replies after tool calls. On server interruption,
+the queued TTS fades out over 10 ms and late PCM from the cancelled response
+is dropped until the next turn. Look for `barge-in: faded out`,
+`barge-in holdoff`, and the dropped-straggler count in device logs.
+
+XMOS acoustic echo cancellation is imperfect; loud speech or music can cause
+false interrupts. Try `noise_reduction: far_field` in the add-on and leave
+hands-free interrupt off until the [AEC qualification](#hardware-bring-up-checklist)
+passes. The realtime-only `i2s_buffer_duration` substitution defaults to
+`500ms`; a smaller value shortens the audible tail after an interrupt or
+"stop" but can stutter music. Test `200ms` with Sendspin before keeping it.
 
 **Timers:** with add-on ≥0.6.1-sat1.4 (`enable_timers` on), ask to set,
 list or cancel timers (up to 8, 1 s–24 h). Timers live on the Satellite1:
@@ -315,12 +325,14 @@ hardware has already passed. Record the firmware and add-on versions,
    for normal operation.
 6. **AEC and barge-in qualification:** Only after the preceding tests,
    enable `enable_recording` in the add-on (input/output WAVs), enable both
-   `interrupt_response` and **Hands-free interrupt**, and record at least
-   20 unattended TTS replies **at each** low, medium and maximum comfortable
-   voice level, both with and without music. Count false interrupts where
-   playback itself triggers barge-in. At each condition, make at least 20
-   deliberate interruptions while TTS plays and count missed/late ones;
-   inspect WAVs for echo leaking into the mic and repeat with speaker and
+   `interrupt_response` and **Hands-free interrupt**, choose a
+   **Barge-in holdoff**, and record at least 20 unattended TTS replies
+   **at each** low, medium and maximum comfortable voice level, both with
+   and without Sendspin music. Count false interrupts where playback itself
+   triggers barge-in. At each condition, make at least 20 deliberate
+   interruptions while TTS plays and count missed/late ones; repeat with a
+   shorter I2S buffer (for example `200ms`) and check music for stutter.
+   Inspect WAVs for echo leaking into the mic and repeat with speaker and
    line-out as appropriate. A provisional pass criterion is **zero false
    interruptions per 20 replies** (fewer than one) and **at most one missed
    interruption per 20 attempts** at every condition. If it fails, lower

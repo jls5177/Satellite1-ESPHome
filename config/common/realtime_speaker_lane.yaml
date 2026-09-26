@@ -1,5 +1,7 @@
-# Extend the stock mixer without changing its announcement or media inputs.
+# Tune the realtime I2S buffer and add an assistant lane to the stock mixer.
 speaker:
+  - id: !extend i2s_audio_speaker
+    buffer_duration: ${i2s_buffer_duration}
   - id: !extend mixing_speaker
     source_speakers:
       - id: assistant_mixing_input

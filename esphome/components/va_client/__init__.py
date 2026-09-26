@@ -13,6 +13,7 @@ CONF_MIC_CHANNEL = "mic_channel"
 CONF_MIC_GAIN = "mic_gain"
 CONF_SPEAKER = "speaker"
 CONF_BARGE_IN = "barge_in"
+CONF_BARGE_IN_HOLDOFF_MS = "barge_in_holdoff_ms"
 CONF_ON_PHASE = "on_phase"
 CONF_ON_REPEATED_FAILURE = "on_repeated_failure"
 CONF_ON_FOLLOWUP_OPENED = "on_followup_opened"
@@ -53,6 +54,9 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_MIC_CHANNEL, default=0): cv.int_range(min=0, max=1),
         cv.Optional(CONF_MIC_GAIN, default=1.0): cv.float_range(min=0.25, max=16.0),
         cv.Optional(CONF_BARGE_IN, default=True): cv.boolean,
+        cv.Optional(CONF_BARGE_IN_HOLDOFF_MS, default=400): cv.int_range(
+            min=0, max=2000
+        ),
         cv.Required(CONF_SPEAKER): cv.use_id(speaker.Speaker),
         cv.Optional(CONF_ON_PHASE): automation.validate_automation(
             {
@@ -102,6 +106,7 @@ async def to_code(config):
     cg.add(var.set_mic_channel(config[CONF_MIC_CHANNEL]))
     cg.add(var.set_mic_gain(config[CONF_MIC_GAIN]))
     cg.add(var.set_barge_in(config[CONF_BARGE_IN]))
+    cg.add(var.set_barge_in_holdoff_ms(config[CONF_BARGE_IN_HOLDOFF_MS]))
 
     mic = await cg.get_variable(config[CONF_MICROPHONE])
     cg.add(var.set_microphone(mic))

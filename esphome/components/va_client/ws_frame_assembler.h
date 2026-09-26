@@ -199,6 +199,18 @@ inline size_t fade_in_samples(int16_t *samples, size_t count, size_t fade_sample
   return pos;
 }
 
+inline size_t barge_in_trim(size_t fill, size_t fade_bytes) {
+  return fill < fade_bytes ? fill : fade_bytes;
+}
+
+inline bool barge_in_mic_allowed(bool phase_is_replying, bool barge_in_effective,
+                                 uint32_t playback_started_ms, uint32_t now_ms, uint32_t holdoff_ms) {
+  // A frame captured just before playback starts must not look 49 days old.
+  return !phase_is_replying || !barge_in_effective ||
+         (playback_started_ms != 0 &&
+          static_cast<int32_t>(now_ms - playback_started_ms) >= static_cast<int32_t>(holdoff_ms));
+}
+
 inline bool release_fade_tail(size_t bytes, size_t fade_bytes, bool done, bool speaker_dry,
                               uint32_t now_ms, uint32_t last_audio_ms,
                               uint32_t starvation_ms) {

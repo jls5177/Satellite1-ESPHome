@@ -47,13 +47,14 @@ class VaClient : public Component {
   // Requests handsfree barge-in when the server also advertises support.
   // When both are true the mic keeps streaming through the
   // `thinking`/`replying` phases instead of being gated off, so the backend's
-  // server VAD can hear the user talk over the assistant. On the `listening`
-  // transition that follows (server confirmed a barge-in) we flush the PSRAM
-  // playback queue so the old TTS stops immediately. When false the firmware
+  // server VAD can hear the user talk over the assistant. Mic TX pauses at the
+  // start of reply playback for the configured holdoff. A server-confirmed
+  // barge-in fades out the remaining PSRAM audio. When false the firmware
   // keeps the original turn-based behaviour (mic off while the assistant
   // speaks). Relies on the XMOS AEC to suppress speaker→mic echo; see the
   // ~10x leak caveat in CLAUDE.md. Safe to change from a HA switch at runtime.
   void set_barge_in(bool v);
+  void set_barge_in_holdoff_ms(uint32_t ms);
   bool is_server_barge_in_enabled() const { return this->server_barge_in_.load(); }
   // Sets the output-volume multiplier applied to TTS in handle_binary_.
   // Driven from yaml by external_media_player's volume / mute state so the
@@ -140,6 +141,7 @@ class VaClient : public Component {
   bool effective_barge_in_() const {
     return this->barge_in_.load() && this->server_barge_in_.load();
   }
+  bool barge_in_mic_allowed_(uint32_t now_ms) const;
   void reset_connection_state_();
   void clear_mic_tx_();
   static void mic_sender_task_trampoline_(void *arg);
@@ -149,7 +151,6 @@ class VaClient : public Component {
   void request_ws_teardown_();
   bool ws_idle_() const;
   void log_mic_health_();
-  void fade_ring_head_();
   void fade_ring_tail_();
   size_t audio_fill_snapshot_();
   // Mic pre-roll helper (mic-task only, no lock). push appends to the rolling
@@ -285,6 +286,11 @@ class VaClient : public Component {
   // Handsfree barge-in toggle, set from yaml (`barge_in:`). See set_barge_in().
   std::atomic<bool> barge_in_{false};
   std::atomic<bool> server_barge_in_{false};
+  std::atomic<uint32_t> barge_in_holdoff_ms_{400};
+  // Zero until the first real (not silence-prime) PCM is fed in this reply.
+  std::atomic<uint32_t> reply_playback_started_ms_{0};
+  std::atomic<bool> drop_until_next_turn_{false};
+  std::atomic<uint32_t> barge_in_dropped_bytes_{0};
   std::atomic<bool> server_hello_received_{false};
   std::atomic<bool> server_barge_warning_logged_{false};
   // Set on phase=idle when there's still TTS audio queued — we can't open
@@ -317,8 +323,8 @@ class VaClient : public Component {
   // is already buffered (backend + our PSRAM) and the backend keeps streaming
   // the rest. Flushing our queue isn't enough — handle_binary_ just refills it
   // from the in-flight frames. While this is true we DROP incoming audio so the
-  // cancelled reply actually goes silent. Cleared in set_phase_ on the next
-  // "idle" (reply ended) or "listening" (a fresh turn's audio is legitimate).
+  // cancelled reply actually goes silent. Cleared in set_phase_ only on
+  // "listening" (a fresh turn's audio is legitimate).
   std::atomic<bool> suppress_incoming_audio_{false};
   // Set by send_interrupt() (a local "stop"), cleared in start_session() (the
   // next wake). After a stop the mic gate is CLOSED, so no new turn can begin
@@ -483,6 +489,12 @@ class VaClient : public Component {
   size_t audio_tail_{0};  // write pos (next byte to fill)
   size_t audio_fill_{0};  // bytes currently queued (audio_tail_ ≥ audio_head_ when not wrapped)
   uint32_t audio_ring_epoch_{0};  // incremented whenever a flush invalidates a drain snapshot
+  // Ring position of the first PCM from this reply, so a previous tool-call
+  // reply's still-draining tail cannot start the new reply's mic holdoff.
+  bool reply_pcm_marker_pending_{false};  // guarded by ring_mux_
+  bool reply_pcm_marker_valid_{false};    // guarded by ring_mux_
+  size_t reply_pcm_marker_{0};           // guarded by ring_mux_
+  uint32_t reply_generation_{0};         // guarded by ring_mux_
   // ESP32-S3 is dual-core: handle_binary_ runs in the esp-idf
   // websocket task (background) while loop() runs in the main app task,
   // typically on the other core. Both touch audio_head_/tail_/fill_
