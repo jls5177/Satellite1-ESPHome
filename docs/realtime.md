@@ -229,9 +229,25 @@ Stop a ringing timer with the "stop" wake word, the center button, or the
    line-out jack. Try disabling **Hands-free interrupt** and
    `interrupt_response`; reduce voice/media level and re-test echo. For
    add-on-side audio diagnosis, `enable_recording: true` writes input/output
-   WAVs to its `recordings/` directory; turn it off when finished and handle
-   recordings as sensitive audio.
-4. **LED ring:** Blue progress indicates XMOS flashing; a green/red pulse
+   WAVs to `/share/openai_realtime_voice_agent/recordings/` (add-on
+   0.6.1-sat1.6+); turn it off when finished and handle recordings as
+   sensitive audio.
+4. **Follow-up answers not heard:** Set the add-on `transcription_language`
+   (for example `en`) so the log shows `🗣️ user:` lines, and enable
+   recording to hear what the backend received. If the input WAV is quiet,
+   raise **Assistant mic gain** (config entity, 1–16, default 1; watch for
+   clipping). **Assistant mic channel** switches the XMOS channel streamed
+   to the backend (`0` is the processed ASR/AEC channel used by stock Assist)
+   without reflashing. Very loud replies can leave the echo canceller
+   suppressing the mic for a moment afterwards; test at a moderate volume
+   and try `noise_reduction: far_field`. The firmware options are
+   `va_mic_gain` / `va_mic_channel` substitutions; the HA entities restore
+   their last value and override them after the first boot.
+5. **Choppy replies:** Firmware from this revision primes the playback
+   buffer once per reply instead of re-priming mid-reply. If replies still
+   stutter, raise the add-on `playback_prebuffer_ms` (for example 300) and
+   check device logs for `ws audio gap` and `downstream underrun` warnings.
+6. **LED ring:** Blue progress indicates XMOS flashing; a green/red pulse
    indicates success/failure. Slow clockwise light means waiting, fast
    clockwise means listening, pulsing means thinking, and fast anticlockwise
    means replying. Red twinkle can mean lost Wi-Fi/API/WebSocket connectivity,

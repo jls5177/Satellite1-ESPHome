@@ -236,12 +236,6 @@ void VaClient::loop() {
     // Retain the fade window until the reply ends or the downstream runs dry.
     const size_t playable = this->reply_audio_done_.load() ? fill :
         (fill > kFadeSamples * sizeof(int16_t) ? fill - kFadeSamples * sizeof(int16_t) : 0);
-    if (playable == 0 && fill > 0 && !this->reply_audio_done_ &&
-        this->playback_prebuffer_ms_ > 0 && !this->playback_priming_ &&
-        !this->speaker_->has_buffered_data()) {
-      this->prime_started_ms_ = millis();
-      this->playback_priming_ = true;
-    }
     if (playable > 0) {
       // Resampler cold-start SILENCE-PRIME (crackle fix). The resampler does NOT
       // idle-timeout (verified vs ESPHome source): resample(stop_gracefully=false)
@@ -672,6 +666,7 @@ void VaClient::reset_connection_state_() {
   portENTER_CRITICAL(&this->ring_mux_);
   this->audio_head_ = this->audio_tail_ = this->audio_fill_ = 0;
   ++this->audio_ring_epoch_;
+  ++this->pcm_flush_epoch_;
   portEXIT_CRITICAL(&this->ring_mux_);
   this->followup_pending_ = false;
   this->request_follow_up_pending_ = false;
@@ -679,6 +674,7 @@ void VaClient::reset_connection_state_() {
   this->waiting_for_speaker_stop_ = false;
   this->idle_emit_pending_ = false;
   this->playback_priming_ = false;
+  this->prime_armed_ = true;
   this->fade_in_pending_ = true;
   this->fade_out_pending_ = false;
   this->thinking_tail_pending_ = false;
@@ -805,9 +801,11 @@ void VaClient::on_ws_event(int32_t event_id, void *event_data) {
       if (data->op_code != 0x01 && data->op_code != 0x02 && !continuation)
         break;
       if (this->last_data_was_binary_) {
+        // Only flushes (interrupt, barge-in, error, disconnect) discard the rest
+        // of an in-flight frame; tail trims keep it so audio isn't dropped.
         uint32_t epoch;
         portENTER_CRITICAL(&this->ring_mux_);
-        epoch = this->audio_ring_epoch_;
+        epoch = this->pcm_flush_epoch_;
         portEXIT_CRITICAL(&this->ring_mux_);
         if (epoch != this->pcm_epoch_) {
           this->pcm_epoch_ = epoch;
@@ -881,6 +879,7 @@ void VaClient::handle_text_(const char *data, size_t len) {
     portENTER_CRITICAL(&this->ring_mux_);
     this->audio_head_ = this->audio_tail_ = this->audio_fill_ = 0;
     ++this->audio_ring_epoch_;
+    ++this->pcm_flush_epoch_;
     portEXIT_CRITICAL(&this->ring_mux_);
     // Without an audible cue the user just sees the LED go idle and
     // assumes the assistant ignored them. Reuse the on_repeated_failure
@@ -956,6 +955,7 @@ void VaClient::handle_text_(const char *data, size_t len) {
       this->reply_audio_done_ = true;
       portEXIT_CRITICAL(&this->ring_mux_);
     }
+    this->prime_armed_ = true;
     return;
   }
 
@@ -1143,15 +1143,10 @@ void VaClient::handle_binary_(const uint8_t *data, size_t len) {
   this->audio_tail_ = (tail + len) % kAudioBufBytes;
   this->audio_fill_ += len;
   portEXIT_CRITICAL(&this->ring_mux_);
-  // Jitter buffer: arm priming only when the ring was empty AND the downstream
-  // chain is dry — i.e. a true reply start or a real underflow. Mid-reply the
-  // ring routinely flips empty (loop() drains each WS clump on arrival) while
-  // the downstream chain still holds ~600 ms of audio; re-arming there did
-  // nothing but spam "prebuffer ready" every ~50 ms and could hold a small
-  // trailing chunk for the full prebuffer deadline. has_buffered_data() is a
-  // counter read, safe enough from the WS task. Only when enabled.
-  if (was_empty && this->playback_prebuffer_ms_ > 0 && !this->playback_priming_ &&
-      !this->speaker_->has_buffered_data()) {
+  // The first PCM of a segment consumes the arm; it primes only if it lands in
+  // an empty ring (old tails keep draining, and later mid-reply gaps don't re-prime).
+  const bool armed = this->prime_armed_.exchange(false);
+  if (armed && was_empty && this->playback_prebuffer_ms_ > 0 && !this->playback_priming_) {
     this->prime_started_ms_ = now_ms;
     this->playback_priming_ = true;
   }
@@ -1179,10 +1174,18 @@ void VaClient::on_mic_data_(const std::vector<uint8_t> &samples) {
   size_t offset = this->mic_channel_ & 0x1;
 
   this->mono_buf_.resize(mono_samples);
+  const int32_t gain_q8 = this->mic_gain_q8_.load();
   uint32_t peak = 0;
   for (size_t i = 0; i < mono_samples; i++) {
     int32_t s = in32[i * 2 + offset];
-    int16_t mono = static_cast<int16_t>(s >> 16);
+    int16_t mono;
+    if (gain_q8 == 256) {
+      mono = static_cast<int16_t>(s >> 16);
+    } else {
+      // Keep 8 extra fraction bits from the 32-bit sample before gain.
+      int64_t v = (static_cast<int64_t>(s >> 8) * gain_q8) >> 16;
+      mono = static_cast<int16_t>(std::max<int64_t>(-32768, std::min<int64_t>(32767, v)));
+    }
     this->mono_buf_[i] = mono;
     peak = std::max(peak, static_cast<uint32_t>(
         mono < 0 ? -static_cast<int32_t>(mono) : static_cast<int32_t>(mono)));
@@ -1332,6 +1335,7 @@ void VaClient::set_phase_(const std::string &phase) {
   //                the session.
   if (phase == "listening") {
     this->reply_audio_done_ = false;
+    this->prime_armed_ = true;
     if (prev == Phase::IDLE && this->audio_fill_snapshot_() == 0)
       this->fade_in_pending_ = true;
     if (!this->streaming_) {
@@ -1350,6 +1354,7 @@ void VaClient::set_phase_(const std::string &phase) {
       this->audio_tail_ = 0;
       this->audio_fill_ = 0;
       ++this->audio_ring_epoch_;
+      ++this->pcm_flush_epoch_;
       portEXIT_CRITICAL(&this->ring_mux_);
       this->idle_emit_pending_ = false;
       this->fade_in_pending_ = true;
@@ -1362,6 +1367,8 @@ void VaClient::set_phase_(const std::string &phase) {
     this->cancel_timeout("va_no_speech");
     this->cancel_timeout("va_followup");
   } else if (phase == "thinking" || phase == "replying") {
+    if (phase == "thinking")
+      this->prime_armed_ = true;
     if (phase == "thinking" && prev == Phase::REPLYING) {
       portENTER_CRITICAL(&this->ring_mux_);
       if (this->audio_fill_ > 0) {
@@ -1416,6 +1423,7 @@ void VaClient::set_phase_(const std::string &phase) {
   } else if (phase == "idle") {
     this->thinking_tail_pending_ = false;
     this->playback_priming_ = false;
+    this->prime_armed_ = true;
     if (!this->reply_audio_done_)
       this->fade_out_pending_ = true;
     this->reply_audio_done_ = true;
@@ -1600,6 +1608,7 @@ void VaClient::start_session() {
   this->fade_in_pending_ = true;
   this->fade_out_pending_ = false;
   this->reply_audio_done_ = false;
+  this->prime_armed_ = true;
   // Tell the backend a fresh wake started (dangling-VAD guard, A). Sent AFTER
   // the residual-reply interrupt above so the backend sees interrupt → wake in
   // order. The first real mic frame for this turn doesn't flow until after this
@@ -1857,12 +1866,14 @@ void VaClient::send_interrupt() {
   this->audio_tail_ = 0;
   this->audio_fill_ = 0;
   ++this->audio_ring_epoch_;
+  ++this->pcm_flush_epoch_;
   portEXIT_CRITICAL(&this->ring_mux_);
   // Drop further incoming TTS until the backend confirms the turn boundary —
   // it keeps streaming the rest of the (already-generated) reply otherwise.
   this->suppress_incoming_audio_ = true;
   // Ring was just flushed; re-arm the jitter buffer fresh for the next reply.
   this->playback_priming_ = false;
+  this->prime_armed_ = true;
   this->fade_out_pending_ = false;
   // Abandon any in-progress cold-start silence-prime; the next reply will detect
   // cold and re-prime cleanly.

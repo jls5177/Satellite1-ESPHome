@@ -33,7 +33,15 @@ class VaClient : public Component {
  public:
   void set_url(const std::string &url) { url_ = url; }
   void set_microphone(microphone::Microphone *m) { mic_ = m; }
-  void set_mic_channel(uint8_t c) { mic_channel_ = c; }
+  void set_mic_channel(uint8_t c) { mic_channel_ = c & 0x1; }
+  // Digital gain applied to the outgoing mic stream (saturating), for XMOS
+  // builds whose processed channel is too quiet for OpenAI's VAD.
+  void set_mic_gain(float g) {
+    if (!(g >= 0.25f)) g = 0.25f;
+    if (g > 16.0f) g = 16.0f;
+    mic_gain_q8_ = static_cast<int32_t>(g * 256.0f + 0.5f);
+  }
+  float get_mic_gain() const { return mic_gain_q8_.load() / 256.0f; }
   void set_speaker(speaker::Speaker *s) { speaker_ = s; }
   // Requests handsfree barge-in when the server also advertises support.
   // When both are true the mic keeps streaming through the
@@ -158,7 +166,8 @@ class VaClient : public Component {
   void open_followup_window_(uint32_t duration_ms);
 
   std::string url_;
-  uint8_t mic_channel_{0};
+  std::atomic<uint8_t> mic_channel_{0};
+  std::atomic<int32_t> mic_gain_q8_{256};
 
   microphone::Microphone *mic_{nullptr};
   speaker::Speaker *speaker_{nullptr};
@@ -349,8 +358,14 @@ class VaClient : public Component {
   // doesn't dry it out → audible crackle. Pushed from the backend `hello`
   // ("playback_prebuffer_ms":N) so it's tunable without reflashing; clamped to
   // kPlaybackPrebufferMaxMs. 0 = disabled (play immediately, old behaviour).
-  // Re-armed when playback dries up, including when only the fade-out tail remains.
+  // Primes once per reply start (see prime_armed_), never mid-reply.
   std::atomic<uint32_t> playback_prebuffer_ms_{0};
+  // Allows at most one prebuffer hold per empty ring. Mid-reply the PSRAM ring
+  // and resampler routinely run near-empty while the mixer/i2s still play, so
+  // re-priming on "ring empty + chain dry" held playback repeatedly and made
+  // the reply choppy. Armed at session/turn boundaries (wake, listening,
+  // thinking, audio_done, idle) and ring flushes; consumed by the next PCM.
+  std::atomic<bool> prime_armed_{true};
   static constexpr uint32_t kPlaybackPrebufferMaxMs = 2000;
   static constexpr uint32_t kPlaybackSampleRate = 24000;  // incoming TTS PCM rate
   // True while we're accumulating the prebuffer cushion (holding playback).
@@ -438,6 +453,7 @@ class VaClient : public Component {
   Pcm16FrameAssembler pcm_assembler_;
   std::vector<uint8_t> pcm_chunk_;
   uint32_t pcm_epoch_{0};
+  uint32_t pcm_flush_epoch_{0};  // guarded by ring_mux_
   uint32_t frame_connection_epoch_{0};
 
   // Output volume multiplier in [0, 1], updated from yaml whenever
