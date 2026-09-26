@@ -290,6 +290,7 @@ class VaClient : public Component {
   // Zero until the first real (not silence-prime) PCM is fed in this reply.
   std::atomic<uint32_t> reply_playback_started_ms_{0};
   std::atomic<bool> drop_until_next_turn_{false};
+  std::atomic<bool> barge_in_trim_pending_{false};  // set by WS task, applied in loop()
   std::atomic<uint32_t> barge_in_dropped_bytes_{0};
   std::atomic<bool> server_hello_received_{false};
   std::atomic<bool> server_barge_warning_logged_{false};

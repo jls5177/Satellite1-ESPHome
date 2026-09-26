@@ -251,6 +251,20 @@ void VaClient::loop() {
     // Snapshot ring state under the lock — head/tail/fill are all
     // mutated from the WS task on the other core.
     portENTER_CRITICAL(&this->ring_mux_);
+    // Barge-in: keep the next 10 ms at the head so playback runs continuously
+    // into a fade-out, and drop the rest. No drain is in flight here.
+    size_t barge_in_dropped = 0;
+    const bool barge_in_trim = this->barge_in_trim_pending_.exchange(false);
+    if (barge_in_trim) {
+      const size_t kept = va_client::barge_in_trim(this->audio_fill_, kFadeSamples * sizeof(int16_t));
+      barge_in_dropped = this->audio_fill_ - kept;
+      this->audio_fill_ = kept;
+      this->audio_tail_ = (this->audio_head_ + kept) % kAudioBufBytes;
+      this->fade_ring_tail_();
+      this->reply_audio_done_ = true;
+      this->fade_out_pending_ = false;
+      this->fade_in_pending_ = true;  // under the lock, before any new append
+    }
     const uint32_t now_ms = millis();
     const bool starved_tail = !this->reply_audio_done_ &&
         release_fade_tail(this->audio_fill_, kFadeSamples * sizeof(int16_t),
@@ -267,6 +281,11 @@ void VaClient::loop() {
     uint32_t epoch = this->audio_ring_epoch_;
     uint32_t reply_generation = this->reply_generation_;
     portEXIT_CRITICAL(&this->ring_mux_);
+    if (barge_in_trim) {
+      this->playback_priming_ = false;
+      ESP_LOGI(TAG, "barge-in: faded out, dropped %u bytes, ~%u ms still queued downstream",
+               (unsigned) barge_in_dropped, (unsigned) (downstream_us / 1000));
+    }
     // Retain the fade window until the reply ends or the downstream runs dry.
     const size_t playable = this->reply_audio_done_.load() ? fill :
         (fill > kFadeSamples * sizeof(int16_t) ? fill - kFadeSamples * sizeof(int16_t) : 0);
@@ -759,6 +778,7 @@ void VaClient::reset_connection_state_() {
   this->server_hello_received_ = false;
   this->server_barge_warning_logged_ = false;
   this->drop_until_next_turn_ = false;
+  this->barge_in_trim_pending_ = false;
   this->barge_in_dropped_bytes_ = 0;
   this->reply_playback_started_ms_ = 0;
   this->streaming_ = false;
@@ -1152,7 +1172,10 @@ void VaClient::handle_binary_(const uint8_t *data, size_t len) {
   // next "idle"/"listening" phase (see set_phase_).
   if (this->suppress_incoming_audio_)
     return;
-  if (this->drop_until_next_turn_) {
+  // Until loop() has trimmed the cancelled reply, new audio would be trimmed
+  // with it, so hold it off too. loop() runs within milliseconds; the next
+  // reply only starts after the user has finished speaking.
+  if (this->drop_until_next_turn_ || this->barge_in_trim_pending_) {
     this->barge_in_dropped_bytes_.fetch_add(static_cast<uint32_t>(len));
     return;
   }
@@ -1233,8 +1256,9 @@ void VaClient::handle_binary_(const uint8_t *data, size_t len) {
   // and PSRAM memcpy is ~10–20 µs, well under any audio deadline.
   portENTER_CRITICAL(&this->ring_mux_);
   if (audio_epoch != this->audio_ring_epoch_ || !this->ws_connected_ ||
-      this->suppress_incoming_audio_ || this->drop_until_next_turn_) {
-    if (this->drop_until_next_turn_)
+      this->suppress_incoming_audio_ || this->drop_until_next_turn_ ||
+      this->barge_in_trim_pending_) {
+    if (this->drop_until_next_turn_ || this->barge_in_trim_pending_)
       this->barge_in_dropped_bytes_.fetch_add(static_cast<uint32_t>(len));
     portEXIT_CRITICAL(&this->ring_mux_);
     return;
@@ -1488,29 +1512,18 @@ void VaClient::set_phase_(const std::string &phase) {
       ESP_LOGI(TAG, "phase=listening — mic streaming on");
       this->streaming_ = true;
     }
-    // The server cancelled this reply on hearing new speech. Retain the
-    // next 10 ms at the head so it runs continuously into a fade-out.
+    // The server cancelled this reply on hearing new speech. Stop taking its
+    // audio now; loop() trims the ring to a faded 10 ms window, since only it
+    // knows which bytes it has already handed to the speaker.
     if (this->effective_barge_in_() && !this->drop_until_next_turn_ &&
         this->audio_fill_snapshot_() > 0) {
-      size_t dropped;
       portENTER_CRITICAL(&this->ring_mux_);
-      const size_t kept = barge_in_trim(this->audio_fill_, kFadeSamples * sizeof(int16_t));
-      dropped = this->audio_fill_ - kept;
-      this->audio_fill_ = kept;
-      this->audio_tail_ = (this->audio_head_ + kept) % kAudioBufBytes;
-      this->fade_ring_tail_();
-      this->reply_audio_done_ = true;
-      this->fade_out_pending_ = false;
       this->drop_until_next_turn_ = true;
       this->barge_in_dropped_bytes_ = 0;
-      ++this->audio_ring_epoch_;
+      this->barge_in_trim_pending_ = true;
       ++this->pcm_flush_epoch_;
       portEXIT_CRITICAL(&this->ring_mux_);
       this->idle_emit_pending_ = false;
-      this->playback_priming_ = false;
-      this->fade_in_pending_ = true;
-      ESP_LOGI(TAG, "barge-in: faded out, dropped %u bytes, ~%u ms still queued downstream",
-               (unsigned) dropped, (unsigned) this->downstream_queued_ms_.load());
     }
     if (this->turn_t_listening_ == 0 && this->turn_t_wake_ != 0) {
       this->turn_t_listening_ = millis();
@@ -1742,6 +1755,7 @@ void VaClient::start_session() {
   }
   this->session_starting_ = true;
   this->drop_until_next_turn_ = false;
+  this->barge_in_trim_pending_ = false;
   this->barge_in_dropped_bytes_ = 0;
   this->reply_playback_started_ms_ = 0;
   portENTER_CRITICAL(&this->ring_mux_);
