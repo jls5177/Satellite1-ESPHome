@@ -15,6 +15,7 @@ namespace esphome {
 namespace va_client {
 
 static const char *const TAG = "va_client";
+static const char *const kWsTaskName = "va_ws";
 
 // Free-function trampoline. esp-idf event registration takes a C function
 // pointer; we recover the VaClient* from the user_data slot.
@@ -152,8 +153,10 @@ void VaClient::setup() {
     return;
   }
   this->mic_tx_ring_.set_storage(this->mic_tx_storage_, kMicTxBufferBytes);
-  if (xTaskCreate(mic_sender_task_trampoline_, "va_mic_tx", 4096, this, 5,
-                  &this->mic_sender_task_) != pdPASS) {
+  // Task stacks live in PSRAM: internal RAM is needed for the mic's I2S DMA
+  // buffers, which otherwise fail to allocate while BLE is still up at boot.
+  if (!this->mic_sender_static_task_.create(mic_sender_task_trampoline_, "va_mic_tx", 4096, this, 5,
+                                            true)) {
     ESP_LOGE(TAG, "Failed to create microphone sender task");
     heap_caps_free(this->mic_tx_storage_);
     this->mic_tx_storage_ = nullptr;
@@ -163,12 +166,14 @@ void VaClient::setup() {
     this->mark_failed();
     return;
   }
-  if (xTaskCreate(ws_teardown_task_trampoline_, "va_ws_stop", 4096, this, 5,
-                  &this->ws_teardown_task_) != pdPASS) {
+  this->mic_sender_task_ = this->mic_sender_static_task_.get_handle();
+  if (!this->ws_teardown_static_task_.create(ws_teardown_task_trampoline_, "va_ws_stop", 4096, this, 5,
+                                             true)) {
     ESP_LOGE(TAG, "Failed to create WebSocket teardown task");
     this->mark_failed();
     return;
   }
+  this->ws_teardown_task_ = this->ws_teardown_static_task_.get_handle();
 
   // Tell the resampler what format we'll feed it. The resampler converts to
   // its yaml-configured output format (48k 16-bit) before passing to the
@@ -202,11 +207,10 @@ void VaClient::loop() {
   }
   if (this->reconnect_requested_.exchange(false)) {
     this->ws_stop_completed_ = false;
-    xTaskNotifyGive(this->ws_teardown_task_);
+    this->request_ws_teardown_();
     this->schedule_reconnect_();
   }
-  if (this->reconnect_start_pending_ && !this->reconnect_pending_ &&
-      this->ws_task_finished_ && this->ws_stop_completed_) {
+  if (this->reconnect_start_pending_ && !this->reconnect_pending_ && this->ws_idle_()) {
     this->reconnect_start_pending_ = false;
     this->connect_();
   }
@@ -439,6 +443,13 @@ void VaClient::ws_teardown_task_trampoline_(void *arg) {
 void VaClient::ws_teardown_loop_() {
   for (;;) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    // connect_() waits until every request up to this snapshot is done, so a
+    // restart can never overlap this pass.
+    const uint32_t request = this->ws_teardown_requests_.load();
+    // A leftover notification for requests an earlier pass already covered
+    // must not stop a client that has since been restarted.
+    if (request == this->ws_teardown_done_.load())
+      continue;
     auto handle = static_cast<esp_websocket_client_handle_t>(this->ws_handle_);
     if (this->ws_destroy_requested_.exchange(false)) {
       if (handle != nullptr) {
@@ -448,16 +459,39 @@ void VaClient::ws_teardown_loop_() {
         this->ws_handle_ = nullptr;
       }
       this->ws_stop_completed_ = true;
+      this->ws_teardown_done_ = request;
       continue;
     }
-    if (handle != nullptr) {
+    if (handle != nullptr && this->ws_task_finished_) {
+      // The WS task already exited on its own. Don't call stop(): if the task
+      // failed fast (e.g. no route before Wi-Fi is up) it can set STOPPED_BIT
+      // before esp_websocket_client_start() clears it, and stop() then blocks
+      // forever. FINISH is posted before the task closes its transport, so wait
+      // until the task is actually gone before allowing a restart.
+      for (uint32_t waited_ms = 0; xTaskGetHandle(kWsTaskName) != nullptr; waited_ms += 10) {
+        if (waited_ms == 2000)
+          ESP_LOGW(TAG, "WebSocket task slow to exit; still waiting before reconnect");
+        vTaskDelay(pdMS_TO_TICKS(10));
+      }
+    } else if (handle != nullptr) {
       const esp_err_t err = esp_websocket_client_stop(handle);
       // ESP_FAIL also means the WS task already stopped on its own.
       if (err != ESP_OK && !this->ws_task_finished_)
         ESP_LOGE(TAG, "WebSocket stop failed before FINISH: %d", (int) err);
     }
     this->ws_stop_completed_ = this->ws_task_finished_.load();
+    this->ws_teardown_done_ = request;
   }
+}
+
+void VaClient::request_ws_teardown_() {
+  ++this->ws_teardown_requests_;
+  xTaskNotifyGive(this->ws_teardown_task_);
+}
+
+bool VaClient::ws_idle_() const {
+  return this->ws_task_finished_ && this->ws_stop_completed_ &&
+         this->ws_teardown_done_.load() == this->ws_teardown_requests_.load();
 }
 
 void VaClient::mic_sender_loop_() {
@@ -520,6 +554,12 @@ void VaClient::log_mic_health_() {
   portENTER_CRITICAL(&this->mic_tx_mux_);
   queued = this->mic_tx_ring_.size();
   portEXIT_CRITICAL(&this->mic_tx_mux_);
+  if (!this->ws_connected_) {
+    ESP_LOGD(TAG, "link: handle=%d finished=%d stop_done=%d reconnect_pending=%d start_pending=%d req=%d",
+             this->ws_handle_ != nullptr, (int) this->ws_task_finished_.load(),
+             (int) this->ws_stop_completed_.load(), (int) this->reconnect_pending_.load(),
+             (int) this->reconnect_start_pending_, (int) this->reconnect_requested_.load());
+  }
   ESP_LOGI(TAG, "mic health: callbacks=%u last=%ums max=%uus peak=%u zero=%u dropped=%u send_fail=%u queued=%u",
            (unsigned) this->mic_callback_count_.exchange(0),
            (unsigned) (now - this->last_mic_callback_ms_.load()),
@@ -557,7 +597,7 @@ void VaClient::fade_ring_tail_() {
 }
 
 void VaClient::connect_() {
-  if (!this->ws_task_finished_ || !this->ws_stop_completed_) {
+  if (!this->ws_idle_()) {
     this->reconnect_start_pending_ = true;
     return;
   }
@@ -579,6 +619,7 @@ void VaClient::connect_() {
 
   esp_websocket_client_config_t cfg = {};
   cfg.uri = this->url_.c_str();
+  cfg.task_name = kWsTaskName;
   cfg.disable_auto_reconnect = true;  // we drive reconnects ourselves with exponential backoff
   cfg.reconnect_timeout_ms = 5000;    // ignored because disable_auto_reconnect=true
   cfg.ping_interval_sec = 30;
@@ -599,7 +640,7 @@ void VaClient::connect_() {
     ESP_LOGE(TAG, "esp_websocket_register_events failed: %d", (int) err);
     this->ws_stop_completed_ = false;
     this->ws_destroy_requested_ = true;
-    xTaskNotifyGive(this->ws_teardown_task_);
+    this->request_ws_teardown_();
     this->schedule_reconnect_();
     return;
   }

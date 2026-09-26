@@ -2,11 +2,11 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
 from esphome.components import microphone, speaker
-from esphome.components import esp32
+from esphome.components import esp32, psram
 from esphome.const import CONF_ID, CONF_URL, CONF_TRIGGER_ID
 
 CODEOWNERS = ["@maxmaxme"]
-DEPENDENCIES = ["network", "microphone", "speaker"]
+DEPENDENCIES = ["network", "microphone", "speaker", "psram"]
 
 CONF_MICROPHONE = "microphone"
 CONF_MIC_CHANNEL = "mic_channel"
@@ -91,6 +91,9 @@ async def to_code(config):
         name="espressif/esp_websocket_client",
         ref="1.7.0",
     )
+
+    # va_client task stacks are allocated in PSRAM.
+    psram.request_external_task_stack()
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)

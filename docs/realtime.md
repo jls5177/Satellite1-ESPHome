@@ -254,6 +254,20 @@ Stop a ringing timer with the "stop" wake word, the center button, or the
    a component failure, or not-ready; check logs to distinguish them. Red
    LEDs near the mics/speaker indicate mute/silence when no higher-priority
    phase animation is active. Idle is normally dark.
+7. **Boot loop or no logs over Wi-Fi:** The HAT's USB-C port only supplies
+   power. Connect the Core board's **CORE/ESP32** USB-C port instead; it
+   exposes the ESP32-S3 USB-Serial/JTAG console used by `logger`. Read it
+   with <https://web.esphome.io> ("Logs"), or with pyserial opened with
+   `dtr=False, rts=False` (asserting them holds the chip in reset). To
+   recover, hold BOOT while tapping RESET, then flash from the host (Docker
+   on macOS can't reach USB devices):
+   `esptool --chip esp32s3 --port /dev/cu.usbmodemXXXX --baud 921600
+   write-flash 0x0 .esphome/build/<name>/build/firmware.factory.bin`.
+   The factory image keeps the NVS partition, so Wi-Fi credentials survive.
+8. **Internal RAM is tight:** The realtime variant moves its task stacks to
+   PSRAM so the microphone's I2S DMA buffers still fit at boot while BLE is
+   enabled. Keep `web_server` out of the device YAML unless the `debug`
+   component shows spare internal heap.
 
 ## Hardware bring-up checklist
 

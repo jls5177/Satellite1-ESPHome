@@ -114,10 +114,23 @@ bool I2SPortComponent::init_driver_(i2s_std_config_t std_cfg) {
     return false;
   }
 
+  // On failure delete every channel created above and clear the handles, so a
+  // retry starts clean instead of using a freed handle (duplex creates both).
+  auto release_channels = [this]() {
+    if (this->tx_handle_ != nullptr) {
+      i2s_del_channel(this->tx_handle_);
+      this->tx_handle_ = nullptr;
+    }
+    if (this->rx_handle_ != nullptr) {
+      i2s_del_channel(this->rx_handle_);
+      this->rx_handle_ = nullptr;
+    }
+  };
+
   if (this->tx_handle_) {
     err = i2s_channel_init_std_mode(this->tx_handle_, &std_cfg);
     if (err != ESP_OK) {
-      i2s_del_channel(this->tx_handle_);
+      release_channels();
       this->unlock();
       return false;
     }
@@ -126,7 +139,7 @@ bool I2SPortComponent::init_driver_(i2s_std_config_t std_cfg) {
   if (this->rx_handle_) {
     err = i2s_channel_init_std_mode(this->rx_handle_, &std_cfg);
     if (err != ESP_OK) {
-      i2s_del_channel(this->rx_handle_);
+      release_channels();
       this->unlock();
       return false;
     }
@@ -172,7 +185,9 @@ bool I2SAudioOut::start_i2s_channel_(i2s_event_callbacks_t callbacks) {
   err = i2s_channel_enable(this->parent_->tx_handle_);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to enable TX channel: %s", esp_err_to_name(err));
-    i2s_del_channel(this->parent_->tx_handle_);
+    // Keep the handle if deletion fails (e.g. still running) so the normal stop path can release it.
+    if (i2s_del_channel(this->parent_->tx_handle_) == ESP_OK)
+      this->parent_->tx_handle_ = nullptr;
     return false;
   }
   return true;
@@ -223,7 +238,10 @@ bool I2SAudioIn::start_i2s_channel_(i2s_event_callbacks_t callbacks) {
 
   err = i2s_channel_enable(this->parent_->rx_handle_);
   if (err != ESP_OK) {
-    i2s_del_channel(this->parent_->rx_handle_);
+    ESP_LOGE(TAG, "Failed to enable RX channel: %s", esp_err_to_name(err));
+    // Keep the handle if deletion fails (e.g. still running) so the normal stop path can release it.
+    if (i2s_del_channel(this->parent_->rx_handle_) == ESP_OK)
+      this->parent_->rx_handle_ = nullptr;
     return false;
   }
   return true;

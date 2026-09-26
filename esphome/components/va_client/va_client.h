@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "esphome/core/static_task.h"
 #include "esphome/components/microphone/microphone.h"
 #include "esphome/components/speaker/speaker.h"
 #include "mic_tx_ring.h"
@@ -145,6 +146,8 @@ class VaClient : public Component {
   void mic_sender_loop_();
   static void ws_teardown_task_trampoline_(void *arg);
   void ws_teardown_loop_();
+  void request_ws_teardown_();
+  bool ws_idle_() const;
   void log_mic_health_();
   void fade_ring_head_();
   void fade_ring_tail_();
@@ -182,8 +185,11 @@ class VaClient : public Component {
   std::atomic<bool> ws_task_finished_{true};
   std::atomic<bool> ws_stop_completed_{true};
   std::atomic<bool> ws_destroy_requested_{false};
+  std::atomic<uint32_t> ws_teardown_requests_{0};
+  std::atomic<uint32_t> ws_teardown_done_{0};
   bool reconnect_start_pending_{false};
   TaskHandle_t ws_teardown_task_{nullptr};
+  StaticTask ws_teardown_static_task_;
   std::atomic<uint32_t> connection_epoch_{0};
   static constexpr uint32_t kWsControlSendTimeoutMs = 250;
   static constexpr size_t kMicTxBufferBytes = 64 * 1024;
@@ -194,6 +200,7 @@ class VaClient : public Component {
   std::atomic<uint32_t> mic_tx_generation_{0};
   SemaphoreHandle_t ws_send_mutex_{nullptr};
   TaskHandle_t mic_sender_task_{nullptr};
+  StaticTask mic_sender_static_task_;
   std::atomic<uint32_t> mic_callback_count_{0};
   std::atomic<uint32_t> mic_callback_max_us_{0};
   std::atomic<uint32_t> last_mic_callback_ms_{0};

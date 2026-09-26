@@ -9,3 +9,4 @@ speaker:
     output_speaker: assistant_mixing_input
     sample_rate: 48000
     bits_per_sample: 16
+    task_stack_in_psram: true
