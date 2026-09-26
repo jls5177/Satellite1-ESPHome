@@ -536,6 +536,12 @@ class VaClient : public Component {
   static constexpr uint32_t kStarveGuardMs = 40;
   static constexpr uint32_t kStarveGapMs = 20;
   PlaybackClock playback_clock_;  // loop() only
+  // Click diagnostics (loop() only).
+  void note_playback_edges_(const int16_t *samples, size_t count);
+  static constexpr int kEdgeQuietLevel = 256;
+  static constexpr int kEdgeStepLevel = 8000;
+  int16_t edge_last_sample_{0};
+  bool edge_dry_{true};
   std::atomic<uint32_t> downstream_queued_ms_{0};  // snapshot for WS-task logs
   // Resume fade-in progress in samples (>= kFadeSamples: none). WS task, under ring_mux_.
   size_t resume_fade_pos_{kFadeSamples};

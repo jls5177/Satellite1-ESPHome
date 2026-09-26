@@ -5,6 +5,7 @@
 #include "esphome/components/audio/audio.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 
 #include <esp_websocket_client.h>
@@ -227,6 +228,12 @@ void VaClient::loop() {
     const uint32_t downstream_us = this->playback_clock_.remaining_us(esp_timer_get_time());
     this->downstream_queued_ms_ = downstream_us / 1000;
     const bool downstream_low = downstream_us < kStarveGuardMs * 1000u;
+    // Click diagnostics: playback running out on a non-zero sample is a step.
+    if (downstream_us == 0 && !this->edge_dry_) {
+      this->edge_dry_ = true;
+      if (std::abs(static_cast<int>(this->edge_last_sample_)) > kEdgeQuietLevel)
+        ESP_LOGW(TAG, "edge: playback ran dry on sample %d", (int) this->edge_last_sample_);
+    }
     // Snapshot ring state under the lock — head/tail/fill are all
     // mutated from the WS task on the other core.
     portENTER_CRITICAL(&this->ring_mux_);
@@ -284,6 +291,8 @@ void VaClient::loop() {
           size_t fed = this->speaker_->play(kSilence, want);
           if (fed > 0) {
             this->playback_clock_.fed(esp_timer_get_time(), fed, kPlaybackSampleRate * 2);
+            this->edge_last_sample_ = 0;
+            this->edge_dry_ = false;
             size_t remaining = this->chain_prime_remaining_.load();
             while (remaining > 0 && !this->chain_prime_remaining_.compare_exchange_weak(
                 remaining, remaining > fed ? remaining - fed : 0)) {}
@@ -344,6 +353,8 @@ void VaClient::loop() {
       if (accepted > 0) {
         this->last_fed_ms_ = millis();  // keep the chain "warm" for cold-detection
         this->playback_clock_.fed(esp_timer_get_time(), accepted, kPlaybackSampleRate * 2);
+        this->note_playback_edges_(reinterpret_cast<const int16_t *>(this->audio_drain_buf_),
+                                   accepted / sizeof(int16_t));
         portENTER_CRITICAL(&this->ring_mux_);
         if (this->audio_ring_epoch_ == epoch && accepted <= this->audio_fill_) {
           this->audio_head_ = (this->audio_head_ + accepted) % kAudioBufBytes;
@@ -579,6 +590,30 @@ void VaClient::log_mic_health_() {
            (unsigned) this->mic_zero_frame_count_.exchange(0),
            (unsigned) this->mic_tx_dropped_frames_.exchange(0),
            (unsigned) this->mic_tx_send_failures_.exchange(0), (unsigned) queued);
+}
+
+void VaClient::note_playback_edges_(const int16_t *samples, size_t count) {
+  if (count == 0)
+    return;
+  const int16_t prev = this->edge_dry_ ? 0 : this->edge_last_sample_;
+  if (this->edge_dry_ && std::abs(static_cast<int>(samples[0])) > kEdgeQuietLevel)
+    ESP_LOGW(TAG, "edge: playback resumed from dry on sample %d", (int) samples[0]);
+  int max_step = std::abs(static_cast<int>(samples[0]) - prev);
+  size_t max_at = 0;
+  for (size_t i = 1; i < count; i++) {
+    const int step = std::abs(static_cast<int>(samples[i]) - static_cast<int>(samples[i - 1]));
+    if (step > max_step) {
+      max_step = step;
+      max_at = i;
+    }
+  }
+  if (max_step > kEdgeStepLevel) {
+    const int before = max_at == 0 ? prev : samples[max_at - 1];
+    ESP_LOGW(TAG, "edge: step %d -> %d at sample %u of %u", before, (int) samples[max_at],
+             (unsigned) max_at, (unsigned) count);
+  }
+  this->edge_last_sample_ = samples[count - 1];
+  this->edge_dry_ = false;
 }
 
 void VaClient::fade_ring_head_() {
