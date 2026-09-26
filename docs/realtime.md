@@ -69,6 +69,8 @@ bring-up.
 The add-on currently shares one conversation/pipeline across connections:
 **use one Satellite1 per add-on instance**. Do not treat multiple connected
 devices as isolated users.
+On each WebSocket connection, firmware sends a `start` message with the
+lowercase base Wi-Fi MAC (`mac`) and ESPHome node name (`name`).
 
 ## 2. Build and flash the firmware
 

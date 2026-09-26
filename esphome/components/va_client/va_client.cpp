@@ -1,10 +1,14 @@
 #include "va_client.h"
 #include "automation.h"
 
+#include "esphome/core/alloc_helpers.h"
+#include "esphome/core/application.h"
 #include "esphome/core/log.h"
 #include "esphome/components/audio/audio.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -833,9 +837,19 @@ void VaClient::on_ws_event(int32_t event_id, void *event_data) {
       ESP_LOGI(TAG, "WS connected");
       this->ws_connected_ = false;
       this->clear_mic_tx_();
-      const char start_msg[] = "{\"type\":\"start\"}";
+      std::string mac = get_mac_address_pretty();
+      std::transform(mac.begin(), mac.end(), mac.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      char start_msg[128];
+      const int start_len =
+          std::snprintf(start_msg, sizeof(start_msg), "{\"type\":\"start\",\"mac\":\"%s\",\"name\":\"%s\"}",
+                        mac.c_str(), App.get_name().c_str());
+      if (start_len < 0 || static_cast<size_t>(start_len) >= sizeof(start_msg)) {
+        this->fail_control_channel_("start marker format");
+        break;
+      }
       auto handle = static_cast<esp_websocket_client_handle_t>(this->ws_handle_);
-      if (!this->send_control_(start_msg, sizeof(start_msg) - 1, "start marker", true))
+      if (!this->send_control_(start_msg, static_cast<size_t>(start_len), "start marker", true))
         break;
       if (!esp_websocket_client_is_connected(handle)) {
         this->fail_control_channel_("start socket check");
