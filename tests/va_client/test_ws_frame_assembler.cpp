@@ -14,6 +14,17 @@ using esphome::va_client::classify_ws_message;
 using esphome::va_client::release_fade_tail;
 using esphome::va_client::PlaybackClock;
 using esphome::va_client::fade_in_samples;
+using esphome::va_client::scale_sample;
+
+static void test_scale_sample_negative() {
+  const size_t num = 238, den = 239;  // size_t operands, as in the ring fades
+  assert(scale_sample(-1000, num, den) == -995);
+  assert(scale_sample(-32768, 1, den) == -137);
+  assert(scale_sample(-5, 0, den) == 0);
+  std::vector<int16_t> s(4, -1000);
+  fade_in_samples(s.data(), s.size(), 4, 0);
+  assert(s[0] == 0 && s[1] == -250 && s[3] == -750);
+}
 
 static void test_playback_clock() {
   PlaybackClock clock;
@@ -159,6 +170,7 @@ static void test_tail_starvation() {
 
 int main() {
   test_playback_clock();
+  test_scale_sample_negative();
   test_fade_in_samples();
   test_pcm_split_at_every_byte();
   test_pcm_continuations_and_flush();

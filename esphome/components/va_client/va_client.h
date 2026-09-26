@@ -539,7 +539,7 @@ class VaClient : public Component {
   // Click diagnostics (loop() only).
   void note_playback_edges_(const int16_t *samples, size_t count);
   static constexpr int kEdgeQuietLevel = 256;
-  static constexpr int kEdgeStepLevel = 8000;
+  static constexpr int kEdgeStepLevel = 12000;
   int16_t edge_last_sample_{0};
   bool edge_dry_{true};
   std::atomic<uint32_t> downstream_queued_ms_{0};  // snapshot for WS-task logs

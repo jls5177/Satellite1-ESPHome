@@ -624,7 +624,7 @@ void VaClient::fade_ring_head_() {
     const size_t offset = (this->audio_head_ + i * 2) % kAudioBufBytes;
     int16_t sample;
     std::memcpy(&sample, this->audio_buf_ + offset, sizeof(sample));
-    sample = static_cast<int16_t>((static_cast<int32_t>(sample) * i) / (count - 1));
+    sample = scale_sample(sample, i, count - 1);
     std::memcpy(this->audio_buf_ + offset, &sample, sizeof(sample));
   }
 }
@@ -637,7 +637,7 @@ void VaClient::fade_ring_tail_() {
     const size_t offset = (this->audio_tail_ + kAudioBufBytes - count * 2 + i * 2) % kAudioBufBytes;
     int16_t sample;
     std::memcpy(&sample, this->audio_buf_ + offset, sizeof(sample));
-    sample = static_cast<int16_t>((static_cast<int32_t>(sample) * (count - 1 - i)) / (count - 1));
+    sample = scale_sample(sample, count - 1 - i, count - 1);
     std::memcpy(this->audio_buf_ + offset, &sample, sizeof(sample));
   }
 }

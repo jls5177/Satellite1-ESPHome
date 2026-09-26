@@ -183,13 +183,19 @@ class PlaybackClock {
   bool valid_{false};
 };
 
+// Scales a sample by num/den with signed math (size_t operands would make a
+// negative sample wrap to a large unsigned value).
+inline int16_t scale_sample(int16_t sample, size_t num, size_t den) {
+  return static_cast<int16_t>((static_cast<int32_t>(sample) * static_cast<int32_t>(num)) /
+                              static_cast<int32_t>(den));
+}
+
 // Continues a linear fade-in of fade_samples samples that is already at
 // position pos (samples faded so far), so a fade can span several chunks.
 // Returns the new position; pos >= fade_samples means no fade is active.
 inline size_t fade_in_samples(int16_t *samples, size_t count, size_t fade_samples, size_t pos) {
   for (size_t i = 0; i < count && pos < fade_samples; i++, pos++)
-    samples[i] = static_cast<int16_t>((static_cast<int32_t>(samples[i]) * static_cast<int32_t>(pos)) /
-                                      static_cast<int32_t>(fade_samples));
+    samples[i] = scale_sample(samples[i], pos, fade_samples);
   return pos;
 }
 
