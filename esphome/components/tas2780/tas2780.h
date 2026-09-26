@@ -36,6 +36,9 @@ class TAS2780 : public audio_dac::AudioDac, public Component, public i2c::I2CDev
   void set_vol_range_min(float min_val) { this->vol_range_min_ = min_val; }
   void set_vol_range_max(float max_val) { this->vol_range_max_ = max_val; }
   void set_selected_channel(ChannelSelect channel) { this->selected_channel_ = channel; }
+  /// Enable/disable the amp's idle noise gate; applied immediately once set up.
+  void set_noise_gate(bool enabled);
+  bool noise_gate() const { return this->noise_gate_; }
 
  protected:
   struct SupplyVoltages {
@@ -50,9 +53,11 @@ class TAS2780 : public audio_dac::AudioDac, public Component, public i2c::I2CDev
   bool read_supply_voltages_(SupplyVoltages *voltages);
   bool write_mute_();
   bool write_volume_();
+  void write_noise_gate_();
 
   float volume_{0};
   bool active_{false};
+  bool noise_gate_{true};
   bool activation_pending_{false};
   bool last_supply_sample_valid_{false};
   SupplyVoltages last_supply_voltages_{};

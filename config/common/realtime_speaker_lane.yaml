@@ -10,3 +10,19 @@ speaker:
     sample_rate: 48000
     bits_per_sample: 16
     task_stack_in_psram: true
+
+# The TAS2780 noise gate powers the amp down after 50 ms of digital silence
+# and back up when audio returns; that clicks at the start and end of each
+# spoken reply because the assistant lane is silent between replies.
+switch:
+  - platform: template
+    id: speaker_noise_gate
+    name: Speaker noise gate
+    icon: mdi:volume-off
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - lambda: id(speaker_dac).set_noise_gate(true);
+    turn_off_action:
+      - lambda: id(speaker_dac).set_noise_gate(false);

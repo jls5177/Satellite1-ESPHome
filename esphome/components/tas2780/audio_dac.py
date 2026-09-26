@@ -31,11 +31,15 @@ DeactivateAction = tas2780_ns.class_(
 CONF_VOL_RNG_MIN = "vol_range_min"
 CONF_VOL_RNG_MAX = "vol_range_max"
 CONF_AMP_LEVEL_IDX = "amp_level_idx" 
+CONF_NOISE_GATE = "noise_gate"
 
 CONFIG_SCHEMA = (
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(tas2780),
+            # The amp's noise gate powers the Class-D down after 50 ms of digital
+            # silence and back up on signal, which can click around short bursts.
+            cv.Optional(CONF_NOISE_GATE, default=True): cv.boolean,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -102,3 +106,4 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await i2c.register_i2c_device(var, config)
+    cg.add(var.set_noise_gate(config[CONF_NOISE_GATE]))

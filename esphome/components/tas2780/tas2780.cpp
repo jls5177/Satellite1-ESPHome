@@ -311,6 +311,7 @@ void TAS2780::init() {
   this->reg(0x0D) = 0x00;            // Remove access Page 0xFD
 
   this->reg(TAS2780_PAGE_SELECT) = 0x00;
+  this->write_noise_gate_();
   // Power Mode 2 (no external VBAT)
   // this->reg(TAS2780_CHNL_0) = 0xA8;
   // this->reg(TAS2780_CHNL_0) = 0xA1;
@@ -418,6 +419,21 @@ void TAS2780::deactivate() {
       (TAS2780_MODE_CTRL_BOP_SRC__PVDD_UVLO & ~TAS2780_MODE_CTRL_MODE_MASK) | TAS2780_MODE_CTRL_MODE__SFTW_SHTDWN;
   this->disable_loop();
   this->active_ = false;
+}
+
+void TAS2780::set_noise_gate(bool enabled) {
+  this->noise_gate_ = enabled;
+  if (this->is_ready())
+    this->write_noise_gate_();
+}
+
+void TAS2780::write_noise_gate_() {
+  static constexpr uint8_t NG_EN = 1 << 2;
+  this->reg(TAS2780_PAGE_SELECT) = 0x00;
+  const uint8_t ng_cfg0 = this->reg(TAS2780_NG_CFG0).get();
+  this->reg(TAS2780_NG_CFG0) = this->noise_gate_ ? (ng_cfg0 | NG_EN) : (ng_cfg0 & ~NG_EN);
+  ESP_LOGD(TAG, "Noise gate %s (NG_CFG0 0x%02X)", this->noise_gate_ ? "enabled" : "disabled",
+           this->reg(TAS2780_NG_CFG0).get());
 }
 
 void TAS2780::reset() {
@@ -583,6 +599,7 @@ void TAS2780::dump_config() {
   ESP_LOGCONFIG(TAG, "  Active: %s", YESNO(this->active_));
   ESP_LOGCONFIG(TAG, "  Activation pending: %s", YESNO(this->activation_pending_));
   ESP_LOGCONFIG(TAG, "  Power mode: %u", this->power_mode_);
+  ESP_LOGCONFIG(TAG, "  Noise gate: %s", YESNO(this->noise_gate_));
   ESP_LOGCONFIG(TAG, "  Muted: %s", YESNO(this->is_muted_));
   if (this->last_supply_sample_valid_) {
     ESP_LOGCONFIG(TAG, "  Last supply sample: MODE_CTRL 0x%02X, VBAT1S %.3f V, PVDD %.3f V",
