@@ -51,5 +51,12 @@ class OnTimerTickTrigger : public Trigger<> {
   explicit OnTimerTickTrigger(VaClient *parent) { parent->add_on_timer_tick_trigger(this); }
 };
 
+class OnAnnouncementRequestTrigger : public Trigger<> {
+ public:
+  explicit OnAnnouncementRequestTrigger(VaClient *parent) {
+    parent->add_on_announcement_request_trigger(this);
+  }
+};
+
 }  // namespace va_client
 }  // namespace esphome

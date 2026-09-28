@@ -77,6 +77,7 @@ binary_sensor:
           condition:
             binary_sensor.is_off: btn_left
           then:
+            - lambda: id(va).set_wake_in_progress(true);
             - script.execute:
                 id: play_sound
                 priority: false
@@ -131,61 +132,69 @@ binary_sensor:
                     else:
                       - if:
                           condition:
-                            lambda: |-
-                              return id(followup_window_open) ||
-                                     (id(voice_assistant_phase) != ${voice_assist_idle_phase_id} &&
-                                      id(voice_assistant_phase) != ${voice_assist_not_ready_phase_id});
+                            lambda: return id(va).announcement_active();
                           then:
+                            - lambda: id(va).cancel_announcement_button();
                             - script.execute: interrupt_realtime_session
                           else:
                             - if:
                                 condition:
-                                  media_player.is_announcing:
-                                    id: external_media_player
+                                  lambda: |-
+                                    return id(followup_window_open) ||
+                                           (id(voice_assistant_phase) != ${voice_assist_idle_phase_id} &&
+                                            id(voice_assistant_phase) != ${voice_assist_not_ready_phase_id});
                                 then:
-                                  media_player.stop:
-                                    announcement: true
-                                    id: external_media_player
+                                  - script.execute: interrupt_realtime_session
                                 else:
                                   - if:
                                       condition:
-                                        media_player.is_playing:
+                                        media_player.is_announcing:
                                           id: external_media_player
                                       then:
-                                        - media_player.pause:
-                                            id: external_media_player
+                                        media_player.stop:
+                                          announcement: true
+                                          id: external_media_player
                                       else:
                                         - if:
                                             condition:
-                                              and:
-                                                - switch.is_off: master_mute_switch
-                                                - lambda: return id(va).is_connected();
+                                              media_player.is_playing:
+                                                id: external_media_player
                                             then:
-                                              - script.execute:
-                                                  id: play_sound
-                                                  priority: true
-                                                  sound_file: "center_button_press_sound"
-                                              - script.wait: play_sound
-                                              - wait_until:
-                                                  condition:
-                                                    not:
-                                                      media_player.is_announcing: external_media_player
-                                                  timeout: 2s
-                                              - delay: !lambda return id(va).get_wake_open_delay_ms();
+                                              - media_player.pause:
+                                                  id: external_media_player
+                                            else:
                                               - if:
                                                   condition:
                                                     and:
                                                       - switch.is_off: master_mute_switch
-                                                      - lambda: |-
-                                                          return id(va).is_connected() && id(va).is_audio_ready() &&
-                                                                 id(voice_assistant_phase) == ${voice_assist_idle_phase_id} &&
-                                                                 !id(followup_window_open);
+                                                      - lambda: return id(va).is_connected();
                                                   then:
-                                                    - lambda: id(va).start_session();
-                                                    - micro_wake_word.disable_model: stop
-                                                    - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
-                                                    - script.execute: control_leds
-                                                    - script.execute: reconcile_ducking
+                                                    - script.execute:
+                                                        id: play_sound
+                                                        priority: true
+                                                        sound_file: "center_button_press_sound"
+                                                    - script.wait: play_sound
+                                                    - wait_until:
+                                                        condition:
+                                                          not:
+                                                            media_player.is_announcing: external_media_player
+                                                        timeout: 2s
+                                                    - delay: !lambda return id(va).get_wake_open_delay_ms();
+                                                    - if:
+                                                        condition:
+                                                          and:
+                                                            - switch.is_off: master_mute_switch
+                                                            - lambda: |-
+                                                                return id(va).is_connected() && id(va).is_audio_ready() &&
+                                                                       id(voice_assistant_phase) == ${voice_assist_idle_phase_id} &&
+                                                                       !id(followup_window_open);
+                                                        then:
+                                                          - lambda: id(va).start_session();
+                                                          - micro_wake_word.disable_model: stop
+                                                          - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
+                                                          - script.execute: control_leds
+                                                          - script.execute: reconcile_ducking
+                                                    - lambda: id(va).set_wake_in_progress(false);
       # Double Click
       #  . Exposed as an event entity. To be used in automations inside Home Assistant
       - timing:

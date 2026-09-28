@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -12,7 +13,7 @@ namespace va_client {
 
 enum class WsMessageType {
   UNKNOWN, ERROR, HELLO, AUDIO_DONE, REQUEST_FOLLOW_UP, PHASE,
-  TIMER_START, TIMER_CANCEL, TIMER_LIST
+  TIMER_START, TIMER_CANCEL, TIMER_LIST, ANNOUNCE, ANNOUNCE_CANCEL, ANNOUNCE_RESULT
 };
 
 inline WsMessageType classify_ws_message(std::string_view message) {
@@ -52,7 +53,242 @@ inline WsMessageType classify_ws_message(std::string_view message) {
     return WsMessageType::TIMER_CANCEL;
   if (type == "timer_list")
     return WsMessageType::TIMER_LIST;
+  if (type == "announce")
+    return WsMessageType::ANNOUNCE;
+  if (type == "announce_cancel")
+    return WsMessageType::ANNOUNCE_CANCEL;
+  if (type == "announce_result")
+    return WsMessageType::ANNOUNCE_RESULT;
   return WsMessageType::UNKNOWN;
+}
+
+inline bool valid_announcement_id(std::string_view id) {
+  if (id.empty() || id.size() > 32)
+    return false;
+  for (char c : id) {
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+          (c >= '0' && c <= '9') || c == '_' || c == '-'))
+      return false;
+  }
+  return true;
+}
+
+// The announcement frames contain only flat string/bool fields. Validate the
+// complete object so an "id" in another field cannot masquerade as its id.
+inline bool announcement_json_field(std::string_view json, std::string_view key,
+                                    std::string_view &value, bool &quoted) {
+  size_t pos = 0;
+  auto space = [&]() {
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' ||
+                                  json[pos] == '\r' || json[pos] == '\n')) ++pos;
+  };
+  space();
+  if (pos == json.size() || json[pos++] != '{') return false;
+  bool found = false;
+  std::string_view parsed_value;
+  bool parsed_quoted = false;
+  do {
+    space();
+    if (pos < json.size() && json[pos] == '}') {
+      ++pos;
+      space();
+      if (pos != json.size() || !found) return false;
+      value = parsed_value;
+      quoted = parsed_quoted;
+      return true;
+    }
+    if (pos == json.size() || json[pos++] != '"') return false;
+    size_t begin = pos;
+    while (pos < json.size() && json[pos] != '"') {
+      if (json[pos] == '\\' || static_cast<unsigned char>(json[pos]) < 0x20) return false;
+      ++pos;
+    }
+    if (pos == json.size()) return false;
+    const auto field = json.substr(begin, pos++ - begin);
+    space();
+    if (pos == json.size() || json[pos++] != ':') return false;
+    space();
+    quoted = pos < json.size() && json[pos] == '"';
+    if (quoted) {
+      begin = ++pos;
+      while (pos < json.size() && json[pos] != '"') {
+        if (json[pos] == '\\') {
+          if (++pos == json.size()) return false;
+        } else if (static_cast<unsigned char>(json[pos]) < 0x20) {
+          return false;
+        }
+        ++pos;
+      }
+      if (pos == json.size()) return false;
+      value = json.substr(begin, pos++ - begin);
+    } else {
+      begin = pos;
+      while (pos < json.size() && json[pos] != ',' && json[pos] != '}' &&
+             json[pos] != ' ' && json[pos] != '\n' &&
+             json[pos] != '\r' && json[pos] != '\t') ++pos;
+      value = json.substr(begin, pos - begin);
+    }
+    if (field == key) {
+      if (found) return false;
+      found = true;
+      parsed_value = value;
+      parsed_quoted = quoted;
+    }
+    space();
+    if (pos == json.size()) return false;
+    if (json[pos] == '}') {
+      ++pos;
+      space();
+      if (pos != json.size() || !found) return false;
+      value = parsed_value;
+      quoted = parsed_quoted;
+      return true;
+    }
+    if (json[pos++] != ',') return false;
+    space();
+    if (pos == json.size() || json[pos] == '}') return false;
+  } while (true);
+}
+
+struct AnnouncementRequest {
+  std::string id;
+  bool chime{false};
+  bool follow_up{false};
+};
+
+inline bool parse_announcement(std::string_view json, AnnouncementRequest &out) {
+  std::string_view id, chime, follow_up;
+  bool quoted = false;
+  if (!announcement_json_field(json, "id", id, quoted) || !quoted ||
+      !valid_announcement_id(id))
+    return false;
+  if (!announcement_json_field(json, "chime", chime, quoted) || quoted ||
+      (chime != "true" && chime != "false"))
+    return false;
+  if (!announcement_json_field(json, "follow_up", follow_up, quoted) || quoted ||
+      (follow_up != "true" && follow_up != "false"))
+    return false;
+  out = {std::string(id), chime == "true", follow_up == "true"};
+  return true;
+}
+
+inline bool parse_announcement_cancel(std::string_view json, std::string &id) {
+  std::string_view value;
+  bool quoted = false;
+  if (!announcement_json_field(json, "id", value, quoted) || !quoted ||
+      !valid_announcement_id(value))
+    return false;
+  id = std::string(value);
+  return true;
+}
+
+inline std::string json_escape_string(std::string_view value) {
+  constexpr char hex[] = "0123456789abcdef";
+  std::string result = "\"";
+  for (unsigned char c : value) {
+    switch (c) {
+      case '"': result += "\\\""; break;
+      case '\\': result += "\\\\"; break;
+      case '\b': result += "\\b"; break;
+      case '\f': result += "\\f"; break;
+      case '\n': result += "\\n"; break;
+      case '\r': result += "\\r"; break;
+      case '\t': result += "\\t"; break;
+      default:
+        if (c < 0x20) {
+          result += "\\u00";
+          result += hex[c >> 4];
+          result += hex[c & 15];
+        } else {
+          result += static_cast<char>(c);
+        }
+    }
+  }
+  result += '"';
+  return result;
+}
+
+inline std::string_view truncate_utf8(std::string_view text, size_t max_chars) {
+  size_t pos = 0, count = 0;
+  while (pos < text.size() && count < max_chars) {
+    const auto c = static_cast<unsigned char>(text[pos]);
+    size_t width = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 :
+                   (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 0;
+    if (width == 0 || pos + width > text.size()) break;
+    for (size_t i = 1; i < width; ++i)
+      if ((static_cast<unsigned char>(text[pos + i]) & 0xC0) != 0x80)
+        return text.substr(0, pos);
+    if (width > 1) {
+      const auto next = static_cast<unsigned char>(text[pos + 1]);
+      if ((width == 2 && c < 0xC2) ||
+          (width == 3 && ((c == 0xE0 && next < 0xA0) ||
+                          (c == 0xED && next >= 0xA0))) ||
+          (width == 4 && (c > 0xF4 || (c == 0xF0 && next < 0x90) ||
+                          (c == 0xF4 && next >= 0x90))))
+        break;
+    }
+    pos += width;
+    ++count;
+  }
+  return text.substr(0, pos);
+}
+
+class AnnouncementReservation {
+ public:
+  enum class State : uint8_t { IDLE, RESERVED, READY, PLAYING, DONE, CANCELLED };
+  bool reserve(std::string_view id, bool follow_up) {
+    if (state_ != State::IDLE || !valid_announcement_id(id)) return false;
+    std::memcpy(id_.data(), id.data(), id.size());
+    id_[id.size()] = '\0';
+    state_ = State::RESERVED;
+    follow_up_ = follow_up;
+    return true;
+  }
+  bool ready(std::string_view id) {
+    if (state_ != State::RESERVED || this->id() != id) return false;
+    state_ = State::READY;
+    return true;
+  }
+  bool playing() {
+    if (state_ != State::READY && state_ != State::PLAYING) return false;
+    state_ = State::PLAYING;
+    return true;
+  }
+  bool finish() {
+    if (state_ != State::PLAYING) return false;
+    state_ = State::DONE;
+    return true;
+  }
+  bool cancel(std::string_view id) {
+    if (!active() || this->id() != id) return false;
+    state_ = State::CANCELLED;
+    return true;
+  }
+  void reset() { state_ = State::IDLE; id_[0] = '\0'; follow_up_ = false; }
+  bool active() const {
+    return state_ == State::RESERVED || state_ == State::READY || state_ == State::PLAYING;
+  }
+  bool admits_pcm() const { return state_ == State::READY || state_ == State::PLAYING; }
+  bool follow_up() const { return follow_up_; }
+  State state() const { return state_; }
+  std::string_view id() const { return id_.data(); }
+
+ private:
+  std::array<char, 33> id_{};
+  State state_{State::IDLE};
+  bool follow_up_{false};
+};
+
+inline const char *announcement_busy_reason(bool connected, bool session, bool followup,
+                                            bool timer, bool reserved, bool phase_idle,
+                                            bool muted) {
+  if (reserved) return "reserved";
+  if (!connected || session) return "session";
+  if (followup) return "followup";
+  if (timer) return "timer";
+  if (!phase_idle) return "phase";
+  if (muted) return "muted";
+  return nullptr;
 }
 
 // esp_websocket_client reports offsets within a frame, not within a whole

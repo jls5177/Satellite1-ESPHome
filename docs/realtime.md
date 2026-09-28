@@ -66,11 +66,11 @@ URL. Start the add-on and check its logs for startup errors. The add-on
 option `interrupt_response` defaults to **off**; leave it off for initial
 bring-up.
 
-The add-on currently shares one conversation/pipeline across connections:
-**use one Satellite1 per add-on instance**. Do not treat multiple connected
-devices as isolated users.
-On each WebSocket connection, firmware sends a `start` message with the
-lowercase base Wi-Fi MAC (`mac`) and ESPHome node name (`name`).
+Use an add-on revision that isolates each satellite's conversation/pipeline
+before connecting multiple devices; older single-pipeline add-ons support
+only one Satellite1 per instance. On each WebSocket connection, firmware
+sends a `start` message with the lowercase base Wi-Fi MAC (`mac`), ESPHome
+node name (`name`), announcement capability, and optional device token.
 
 ## 2. Build and flash the firmware
 
@@ -189,13 +189,13 @@ Useful Home Assistant controls from this firmware:
 | **Speaker channel output**, **Line-Out Connected** | Output selection/status for speaker and jack. |
 | **LED Ring**, **Restart Sat1**, **USB-C Power Supply**, **XMOS Firmware** | Device controls and diagnostics. |
 
-The firmware ducks the **media** mixer input by 20 dB immediately while
-assistant activity, follow-up, queued assistant audio, or an announcement is
-present, then restores it over about one second. Music keeps its own media
-lane; the announcement and assistant lanes are not themselves ducked. Check
-restoration in your own Music Assistant / Sendspin setup, including the
-follow-up window. Media volume and assistant voice level are separate;
-media-player **mute** applies to both.
+The firmware ducks the **media** mixer input by 20 dB immediately during
+assistant activity, follow-up, an AI announcement reservation, queued assistant
+audio, or an announcement, then restores it over about one second. Music keeps
+its own media lane; the announcement and assistant lanes are not themselves
+ducked. Check restoration in your own Music Assistant / Sendspin setup,
+including the follow-up window. Media volume and assistant voice level are
+separate; media-player **mute** applies to both.
 
 ### Hands-free interruption (barge-in)
 
@@ -224,6 +224,25 @@ on reconnect, but are lost on reboot. The LED ring shows timer progress.
 Stop a ringing timer with the "stop" wake word, the center button, or the
 **Stop Timer Ringing** button in Home Assistant; ringing auto-stops after
 15 minutes. Timers are untested on hardware in this preview.
+
+### Announcements
+
+The compatible add-on supplies per-satellite and all-satellites Home Assistant
+**notify** entities (when MQTT discovery is enabled). To target this device
+without MQTT, call its ESPHome `announce` action with `message` (text),
+`chime` (boolean), and `follow_up` (`auto`, `always`, or `never`). The device
+sends the text to the add-on; it never synthesizes speech locally. A busy
+device rejects the reservation and the add-on may retry until its job expires.
+
+Set `va_token` in the realtime YAML to the per-device token configured in the
+add-on. The default is empty, which omits the `token` field from `start`; keep
+the token private and out of version control. Change
+`announcement_chime_sound_file` to customize the short chime. By default it
+uses the existing FPH `center_button_press.flac`: a short, neutral cue distinct
+from the wake and timer sounds. Music stays ducked from reservation through
+speaker drain; a follow-up window opens only when the announcement requests it.
+If the add-on's ordinary follow-up duration is disabled, an explicitly
+requested announcement follow-up uses the existing 10-second request window.
 
 ## Troubleshooting
 
@@ -289,6 +308,13 @@ Stop a ringing timer with the "stop" wake word, the center button, or the
    PSRAM so the microphone's I2S DMA buffers still fit at boot while BLE is
    enabled. Keep `web_server` out of the device YAML unless the `debug`
    component shows spare internal heap.
+10. **Announcement doesn't play:** Check `announce: reserved`, `announce: ready`,
+    `announce: playing`, and `announce: done id=…` in device logs. If the
+    add-on sees `announce_busy`, check for an active session/follow-up, a
+    ringing timer, or media-player mute. `announce: cancelled id=…` indicates
+    interruption or the 10-second no-PCM timeout. `announce_result: ok` or
+    `announce_result: error` reports the ESPHome action's submission result;
+    also check the add-on's logs for delivery failures.
 
 ## Hardware bring-up checklist
 

@@ -12,6 +12,8 @@ switch:
     internal: true
     restore_mode: ALWAYS_OFF
     on_turn_on:
+      - lambda: id(va).set_timer_ringing(true);
+      - script.stop: announcement_chime
       - micro_wake_word.enable_model: stop
       - lambda: id(stop).set_probability_cutoff(102);
       - script.execute: reconcile_ducking
@@ -19,6 +21,7 @@ switch:
       - script.execute: control_leds
       - script.execute: timer_ring_watchdog
     on_turn_off:
+      - lambda: id(va).set_timer_ringing(false);
       - script.stop: timer_ring_watchdog
       - lambda: id(va).stop_ringing();
       - script.execute: disable_timer_repeat

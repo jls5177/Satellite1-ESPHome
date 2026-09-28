@@ -21,6 +21,8 @@ CONF_ON_TIMER_STARTED = "on_timer_started"
 CONF_ON_TIMER_FINISHED = "on_timer_finished"
 CONF_ON_TIMER_CANCELLED = "on_timer_cancelled"
 CONF_ON_TIMER_TICK = "on_timer_tick"
+CONF_TOKEN = "token"
+CONF_ON_ANNOUNCEMENT_REQUEST = "on_announcement_request"
 
 va_client_ns = cg.esphome_ns.namespace("va_client")
 VaClient = va_client_ns.class_("VaClient", cg.Component)
@@ -45,11 +47,15 @@ OnTimerCancelledTrigger = va_client_ns.class_(
 OnTimerTickTrigger = va_client_ns.class_(
     "OnTimerTickTrigger", automation.Trigger.template()
 )
+OnAnnouncementRequestTrigger = va_client_ns.class_(
+    "OnAnnouncementRequestTrigger", automation.Trigger.template()
+)
 
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(VaClient),
         cv.Required(CONF_URL): cv.string,
+        cv.Optional(CONF_TOKEN, default=""): cv.string,
         cv.Required(CONF_MICROPHONE): cv.use_id(microphone.Microphone),
         cv.Optional(CONF_MIC_CHANNEL, default=0): cv.int_range(min=0, max=1),
         cv.Optional(CONF_MIC_GAIN, default=1.0): cv.float_range(min=0.25, max=16.0),
@@ -85,6 +91,9 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_ON_TIMER_TICK): automation.validate_automation(
             {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OnTimerTickTrigger)}
         ),
+        cv.Optional(CONF_ON_ANNOUNCEMENT_REQUEST): automation.validate_automation(
+            {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OnAnnouncementRequestTrigger)}
+        ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -103,6 +112,7 @@ async def to_code(config):
     await cg.register_component(var, config)
 
     cg.add(var.set_url(config[CONF_URL]))
+    cg.add(var.set_token(config[CONF_TOKEN]))
     cg.add(var.set_mic_channel(config[CONF_MIC_CHANNEL]))
     cg.add(var.set_mic_gain(config[CONF_MIC_GAIN]))
     cg.add(var.set_barge_in(config[CONF_BARGE_IN]))
@@ -123,6 +133,10 @@ async def to_code(config):
         await automation.build_automation(trigger, [], conf)
 
     for conf in config.get(CONF_ON_FOLLOWUP_OPENED, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(trigger, [], conf)
+
+    for conf in config.get(CONF_ON_ANNOUNCEMENT_REQUEST, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         await automation.build_automation(trigger, [], conf)
 

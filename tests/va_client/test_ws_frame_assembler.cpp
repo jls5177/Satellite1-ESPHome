@@ -17,6 +17,13 @@ using esphome::va_client::fade_in_samples;
 using esphome::va_client::scale_sample;
 using esphome::va_client::barge_in_trim;
 using esphome::va_client::barge_in_mic_allowed;
+using esphome::va_client::AnnouncementRequest;
+using esphome::va_client::AnnouncementReservation;
+using esphome::va_client::parse_announcement;
+using esphome::va_client::parse_announcement_cancel;
+using esphome::va_client::json_escape_string;
+using esphome::va_client::truncate_utf8;
+using esphome::va_client::announcement_busy_reason;
 
 static void test_scale_sample_negative() {
   const size_t num = 238, den = 239;  // size_t operands, as in the ring fades
@@ -141,7 +148,76 @@ static void test_message_types() {
   assert(classify_ws_message("{\"type\":\"timer_list\"}") == WsMessageType::TIMER_LIST);
   assert(classify_ws_message("{ \"type\" : \"timer_start\" }") == WsMessageType::TIMER_START);
   assert(classify_ws_message("{\"type\":\"timer_list_extra\"}") == WsMessageType::UNKNOWN);
+  assert(classify_ws_message("{\"type\":\"announce\"}") == WsMessageType::ANNOUNCE);
+  assert(classify_ws_message("{\"type\":\"announce_cancel\"}") == WsMessageType::ANNOUNCE_CANCEL);
+  assert(classify_ws_message("{\"type\":\"announce_result\"}") == WsMessageType::ANNOUNCE_RESULT);
+  assert(classify_ws_message("{\"type\":\"announce_extra\"}") == WsMessageType::UNKNOWN);
   assert(classify_ws_message("{\"type\":\"invalid}") == WsMessageType::UNKNOWN);
+}
+
+static void test_announcement_protocol() {
+  AnnouncementRequest request;
+  assert(parse_announcement("{\"type\":\"announce\",\"id\":\"Ab_9-\",\"chime\":true,\"follow_up\":false}", request));
+  assert(request.id == "Ab_9-" && request.chime && !request.follow_up);
+  assert(parse_announcement("{ \"follow_up\" : true, \"chime\":false,\"id\":\"abc\" }", request));
+  assert(request.id == "abc" && !request.chime && request.follow_up);
+  assert(!parse_announcement("{\"id\":\"bad space\",\"chime\":true,\"follow_up\":false}", request));
+  assert(!parse_announcement("{\"id\":\"a.b\",\"chime\":true,\"follow_up\":false}", request));
+  assert(!parse_announcement("{\"id\":\"\",\"chime\":true,\"follow_up\":false}", request));
+  assert(!parse_announcement("{\"id\":\"" + std::string(33, 'x') +
+                             "\",\"chime\":true,\"follow_up\":false}", request));
+  assert(!parse_announcement("{\"id\":\"ok\",\"chime\":\"true\",\"follow_up\":false}", request));
+  assert(!parse_announcement("{\"id\":\"ok\",\"chime\":true,\"follow_up\":null}", request));
+  assert(!parse_announcement("{\"id\":\"ok\",\"id\":\"again\",\"chime\":true,\"follow_up\":false}", request));
+  assert(!parse_announcement("{\"id\":\"ok\",\"chime\":true,\"follow_up\":false,}", request));
+  assert(!parse_announcement("{\"note\":\"\\\"id\\\":\\\"fake\\\"\",\"chime\":true,\"follow_up\":false}", request));
+  std::string id;
+  assert(parse_announcement_cancel("{\"type\":\"announce_cancel\",\"id\":\"good-1\"}", id));
+  assert(id == "good-1");
+  assert(!parse_announcement_cancel("{\"type\":\"announce_cancel\",\"id\":\"bad\\\"\"}", id));
+  assert(!parse_announcement_cancel("{\"id\":\"bad!\"}", id));
+}
+
+static void test_announcement_reservation() {
+  using State = AnnouncementReservation::State;
+  AnnouncementReservation r;
+  assert(r.state() == State::IDLE && !r.active());
+  assert(r.reserve("first_1", true));
+  assert(r.active() && r.follow_up() && r.id() == "first_1");
+  assert(!r.reserve("second", false));
+  assert(!r.ready("wrong") && !r.playing() && !r.finish());
+  assert(r.ready("first_1") && r.admits_pcm() && r.state() == State::READY);
+  assert(!r.ready("first_1") && r.playing() && r.state() == State::PLAYING);
+  assert(r.finish() && r.state() == State::DONE && !r.active() && !r.finish());
+  r.reset();
+  assert(r.reserve("second", false) && !r.follow_up());
+  assert(!r.cancel("first_1") && r.cancel("second"));
+  assert(r.state() == State::CANCELLED && !r.active());
+  r.reset();
+  assert(r.state() == State::IDLE && r.id().empty());
+  assert(announcement_busy_reason(true, false, false, false, false, true, false) == nullptr);
+  assert(std::string(announcement_busy_reason(true, true, false, false, false, true, false)) == "session");
+  assert(std::string(announcement_busy_reason(true, false, true, false, false, true, false)) == "followup");
+  assert(std::string(announcement_busy_reason(true, false, false, true, false, true, false)) == "timer");
+  assert(std::string(announcement_busy_reason(true, false, false, false, true, true, false)) == "reserved");
+  assert(std::string(announcement_busy_reason(true, false, false, false, false, false, false)) == "phase");
+  assert(std::string(announcement_busy_reason(true, false, false, false, false, true, true)) == "muted");
+  assert(std::string(announcement_busy_reason(false, false, false, false, false, true, false)) == "session");
+}
+
+static void test_announcement_text_encoding() {
+  assert(json_escape_string("a\"b\\c\n\t\r") == "\"a\\\"b\\\\c\\n\\t\\r\"");
+  assert(json_escape_string(std::string(1, '\x01')) == "\"\\u0001\"");
+  assert(json_escape_string("é") == "\"é\"");
+  assert(truncate_utf8("abc", 2) == "ab");
+  assert(truncate_utf8("aé雪z", 3) == "aé雪");
+  assert(truncate_utf8("aé雪z", 500) == "aé雪z");
+  assert(truncate_utf8(std::string(499, 'x') + "éz", 500) ==
+         std::string(499, 'x') + "é");
+  assert(truncate_utf8("a\xe2\x82", 5) == "a");
+  assert(truncate_utf8("a\xc0\x80", 5) == "a");
+  assert(truncate_utf8("a\xed\xa0\x80", 5) == "a");
+  assert(truncate_utf8("a\xf4\x90\x80\x80", 5) == "a");
 }
 
 static void test_text_bounds_and_out_of_order() {
@@ -205,6 +281,9 @@ int main() {
   test_pcm_continuations_and_flush();
   test_text_split_and_fragmented();
   test_message_types();
+  test_announcement_protocol();
+  test_announcement_reservation();
+  test_announcement_text_encoding();
   test_text_bounds_and_out_of_order();
   test_tail_starvation();
   test_barge_in_trim();

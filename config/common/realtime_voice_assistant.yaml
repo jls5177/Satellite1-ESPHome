@@ -7,6 +7,7 @@ substitutions:
   voice_assist_not_ready_phase_id: '10'
   voice_assist_error_phase_id: '11'
   va_mic_gain: "1.0"
+  va_token: ""
 
 globals:
   - id: voice_assistant_phase
@@ -25,6 +26,10 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  - id: announcement_chime_id
+    type: std::string
+    restore_value: no
+    initial_value: '""'
 
 microphone:
   - platform: satellite1
@@ -40,6 +45,7 @@ microphone:
 va_client:
   id: va
   url: ${va_url}
+  token: ${va_token}
   microphone: sat1_mics
   mic_channel: ${va_mic_channel}
   mic_gain: ${va_mic_gain}
@@ -129,6 +135,14 @@ va_client:
               id: play_sound
               priority: true
               sound_file: "factory_reset_cancelled_sound"
+  on_announcement_request:
+    - script.execute: reconcile_ducking
+    - micro_wake_word.enable_model: stop
+    - lambda: id(stop).set_probability_cutoff(128);
+    - lambda: id(announcement_chime_id) = id(va).announcement_id();
+    - script.execute:
+        id: announcement_chime
+        request_id: !lambda return id(announcement_chime_id);
   on_followup_opened:
     - lambda: |-
         id(followup_window_open) = true;
@@ -233,13 +247,23 @@ micro_wake_word:
                       - if:
                           condition:
                             lambda: |-
-                              return id(va).turn_has_reply_audio() &&
+                              return id(va).announcement_active() ||
+                                     (id(va).turn_has_reply_audio() &&
                                      (id(followup_window_open) ||
                                       (id(voice_assistant_phase) != ${voice_assist_idle_phase_id} &&
-                                       id(voice_assistant_phase) != ${voice_assist_not_ready_phase_id}));
+                                       id(voice_assistant_phase) != ${voice_assist_not_ready_phase_id})));
                           then:
                             - script.execute: interrupt_realtime_session
                     else:
+                      - lambda: id(va).cancel_announcement_wake();
+                      - if:
+                          condition:
+                            lambda: return id(announcement_chime).is_running();
+                          then:
+                            - script.stop: announcement_chime
+                            - media_player.stop:
+                                id: external_media_player
+                                announcement: true
                       - if:
                           condition:
                             lambda: return id(va).is_connected();
@@ -254,6 +278,7 @@ micro_wake_word:
                                 id(followup_requested) = false;
                             - script.stop: followup_window_watchdog
                             - speaker.stop: assistant_resampling_speaker
+                            - lambda: id(va).set_wake_in_progress(true);
                             - if:
                                 condition:
                                   switch.is_on: wake_sound
@@ -280,6 +305,7 @@ micro_wake_word:
                                   - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
                                   - script.execute: control_leds
                                   - script.execute: reconcile_ducking
+                            - lambda: id(va).set_wake_in_progress(false);
                           else:
                             - script.execute:
                                 id: play_sound
@@ -341,6 +367,27 @@ switch:
     on_turn_off:
       - lambda: id(va).set_barge_in(false);
 script:
+  - id: announcement_chime
+    mode: restart
+    parameters:
+      request_id: string
+    then:
+      - script.execute:
+          id: play_sound
+          priority: true
+          sound_file: "announcement_chime_sound"
+      - script.wait: play_sound
+      - wait_until:
+          condition:
+            media_player.is_announcing: external_media_player
+          timeout: 1s
+      - wait_until:
+          condition:
+            not:
+              media_player.is_announcing: external_media_player
+          timeout: 2s
+      - lambda: id(va).announce_ready(request_id);
+      - script.execute: reconcile_ducking
   - id: start_realtime_wake_word
     mode: restart
     then:
@@ -363,6 +410,14 @@ script:
       - script.execute: control_leds
   - id: interrupt_realtime_session
     then:
+      - if:
+          condition:
+            lambda: return id(announcement_chime).is_running();
+          then:
+            - script.stop: announcement_chime
+            - media_player.stop:
+                id: external_media_player
+                announcement: true
       - lambda: id(va).send_interrupt();
       - speaker.stop: assistant_resampling_speaker
       - lambda: |-
@@ -404,6 +459,7 @@ script:
       - lambda: |-
           id(va).set_volume(id(external_media_player).is_muted()
                                 ? 0.0f : id(assistant_voice_level).state);
+          id(va).set_media_muted(id(external_media_player).is_muted());
   - id: reconcile_ducking
     then:
       - if:
@@ -412,6 +468,7 @@ script:
               return (id(voice_assistant_phase) != ${voice_assist_idle_phase_id} &&
                       id(voice_assistant_phase) != ${voice_assist_not_ready_phase_id}) ||
                      id(followup_window_open) ||
+                     id(va).announcement_active() ||
                      id(assistant_resampling_speaker).has_buffered_data() ||
                      id(external_media_player).state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING ||
                      id(timer_ringing).state;
@@ -442,10 +499,21 @@ interval:
       - if:
           condition:
             lambda: |-
+              return id(announcement_chime).is_running() &&
+                     id(va).announcement_id() != id(announcement_chime_id);
+          then:
+            - script.stop: announcement_chime
+            - media_player.stop:
+                id: external_media_player
+                announcement: true
+      - if:
+          condition:
+            lambda: |-
               return id(media_ducked) ||
                      (id(voice_assistant_phase) != ${voice_assist_idle_phase_id} &&
                       id(voice_assistant_phase) != ${voice_assist_not_ready_phase_id}) ||
                      id(followup_window_open) ||
+                     id(va).announcement_active() ||
                      id(assistant_resampling_speaker).has_buffered_data() ||
                      id(external_media_player).state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING ||
                      id(timer_ringing).state;

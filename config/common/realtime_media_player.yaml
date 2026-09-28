@@ -9,6 +9,7 @@ substitutions:
   factory_reset_cancelled_sound_file: https://fph-firmware-assets.s3.us-east-1.amazonaws.com/sounds/factory_reset_cancelled.mp3
   factory_reset_confirmed_sound_file: https://fph-firmware-assets.s3.us-east-1.amazonaws.com/sounds/factory_reset_confirmed.mp3
   center_button_press_sound_file: https://fph-firmware-assets.s3.us-east-1.amazonaws.com/sounds/center_button_press.flac
+  announcement_chime_sound_file: https://fph-firmware-assets.s3.us-east-1.amazonaws.com/sounds/center_button_press.flac
   center_button_double_press_sound_file: https://fph-firmware-assets.s3.us-east-1.amazonaws.com/sounds/center_button_double_press.flac
   center_button_triple_press_sound_file: https://fph-firmware-assets.s3.us-east-1.amazonaws.com/sounds/center_button_triple_press.flac
   center_button_long_press_sound_file: https://fph-firmware-assets.s3.us-east-1.amazonaws.com/sounds/center_button_long_press.flac
@@ -34,6 +35,8 @@ audio_file:
     file: ${wake_word_triggered_sound_file}
   - id: center_button_press_sound
     file: ${center_button_press_sound_file}
+  - id: announcement_chime_sound
+    file: ${announcement_chime_sound_file}
   - id: center_button_double_press_sound
     file: ${center_button_double_press_sound_file}
   - id: center_button_triple_press_sound

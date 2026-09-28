@@ -1,5 +1,13 @@
 api:
   id: api_id
+  actions:
+    - action: announce
+      variables:
+        message: string
+        chime: bool
+        follow_up: string
+      then:
+        - lambda: id(va).send_announce_text(message, chime, follow_up);
   on_client_connected:
     - script.execute: control_leds
     - script.execute: start_realtime_wake_word

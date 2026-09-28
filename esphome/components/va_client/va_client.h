@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -29,10 +30,12 @@ class OnTimerStartedTrigger;
 class OnTimerFinishedTrigger;
 class OnTimerCancelledTrigger;
 class OnTimerTickTrigger;
+class OnAnnouncementRequestTrigger;
 
 class VaClient : public Component {
  public:
   void set_url(const std::string &url) { url_ = url; }
+  void set_token(const std::string &token) { token_ = token; }
   void set_microphone(microphone::Microphone *m) { mic_ = m; }
   void set_mic_channel(uint8_t c) { mic_channel_ = c & 0x1; }
   // Digital gain applied to the outgoing mic stream (saturating), for XMOS
@@ -63,6 +66,22 @@ class VaClient : public Component {
   // HA api: block on this firmware — there's no remote slider.) Range
   // [0, 1]; values are clamped on read so callers don't have to bounds-check.
   void set_volume(float v) { volume_ = v; }
+  void set_media_muted(bool muted) { media_muted_ = muted; }
+  void set_timer_ringing(bool ringing);
+  void set_wake_in_progress(bool waking) { wake_in_progress_ = waking; }
+  bool announcement_active() const {
+    portENTER_CRITICAL(&announcement_mux_);
+    bool active = announcement_.active();
+    portEXIT_CRITICAL(&announcement_mux_);
+    return active;
+  }
+  std::string announcement_id() const {
+    portENTER_CRITICAL(&announcement_mux_);
+    char id[33];
+    std::memcpy(id, announcement_.id().data(), announcement_.id().size() + 1);
+    portEXIT_CRITICAL(&announcement_mux_);
+    return id;
+  }
   void add_on_phase_trigger(OnPhaseTrigger *t) { phase_triggers_.push_back(t); }
   void add_on_repeated_failure_trigger(OnRepeatedFailureTrigger *t) {
     repeated_failure_triggers_.push_back(t);
@@ -74,6 +93,9 @@ class VaClient : public Component {
   void add_on_timer_finished_trigger(OnTimerFinishedTrigger *t) { timer_finished_triggers_.push_back(t); }
   void add_on_timer_cancelled_trigger(OnTimerCancelledTrigger *t) { timer_cancelled_triggers_.push_back(t); }
   void add_on_timer_tick_trigger(OnTimerTickTrigger *t) { timer_tick_triggers_.push_back(t); }
+  void add_on_announcement_request_trigger(OnAnnouncementRequestTrigger *t) {
+    announcement_request_triggers_.push_back(t);
+  }
 
   bool has_active_timers() const { return timers_.has_active(millis()); }
   bool has_ringing_timers() const { return timers_.has_ringing(); }
@@ -101,6 +123,11 @@ class VaClient : public Component {
   // YAML-callable actions.
   void start_session();
   void send_interrupt();
+  void cancel_announcement_button();
+  void cancel_announcement_stop();
+  void cancel_announcement_wake();
+  void announce_ready(const std::string &id);
+  void send_announce_text(const std::string &message, bool chime, const std::string &follow_up);
   // Called from yaml's on_followup_opened automation AFTER the chime has
   // finished announcing through the speaker (wait_until !is_announcing +
   // i2s tail). Opens the mic for kRequestFollowUpMs. No-op if the device
@@ -168,8 +195,21 @@ class VaClient : public Component {
   // independently of a server-sent phase).
   void fire_phase_led_(const std::string &phase);
   void open_followup_window_(uint32_t duration_ms);
+  bool cancel_announcement_(const char *reason, bool notify = true, bool require_ready = false);
+  void finish_announcement_();
+  static const char *announcement_state_name_(AnnouncementReservation::State state);
+  void log_announcement_(const AnnouncementReservation &reservation);
 
   std::string url_;
+  std::string token_;
+  mutable portMUX_TYPE announcement_mux_ = portMUX_INITIALIZER_UNLOCKED;
+  AnnouncementReservation announcement_;
+  std::atomic<bool> announcement_chime_pending_{false};
+  std::atomic<uint32_t> announcement_ready_ms_{0};
+  std::atomic<bool> followup_open_waiting_{false};
+  std::atomic<bool> timer_ringing_{false};
+  std::atomic<bool> wake_in_progress_{false};
+  std::atomic<bool> media_muted_{false};
   std::atomic<uint8_t> mic_channel_{0};
   std::atomic<int32_t> mic_gain_q8_{256};
 
@@ -233,6 +273,7 @@ class VaClient : public Component {
   std::vector<OnTimerFinishedTrigger *> timer_finished_triggers_;
   std::vector<OnTimerCancelledTrigger *> timer_cancelled_triggers_;
   std::vector<OnTimerTickTrigger *> timer_tick_triggers_;
+  std::vector<OnAnnouncementRequestTrigger *> announcement_request_triggers_;
   // Main-loop owned: WS callbacks enqueue commands with defer(), never touch timers_.
   VaTimers timers_;
   uint32_t last_timer_tick_ms_{0};
