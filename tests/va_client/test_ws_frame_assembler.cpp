@@ -24,6 +24,7 @@ using esphome::va_client::parse_announcement_cancel;
 using esphome::va_client::json_escape_string;
 using esphome::va_client::truncate_utf8;
 using esphome::va_client::announcement_busy_reason;
+using esphome::va_client::announcement_timeout_elapsed;
 
 static void test_scale_sample_negative() {
   const size_t num = 238, den = 239;  // size_t operands, as in the ring fades
@@ -205,6 +206,20 @@ static void test_announcement_reservation() {
   assert(std::string(announcement_busy_reason(false, false, false, false, false, true, false)) == "session");
 }
 
+static void test_announcement_timeout_elapsed() {
+  assert(!announcement_timeout_elapsed(3999, 0, 4000));
+  assert(announcement_timeout_elapsed(4000, 0, 4000));
+  assert(!announcement_timeout_elapsed(9999, 0, 10000));
+  assert(announcement_timeout_elapsed(10000, 0, 10000));
+  // Snapshot taken before the WS task recorded the ready timestamp.
+  assert(!announcement_timeout_elapsed(100, 101, 10000));
+  assert(!announcement_timeout_elapsed(0, 1, 4000));
+  assert(!announcement_timeout_elapsed(2998, UINT32_MAX - 1000, 4000));
+  assert(announcement_timeout_elapsed(2999, UINT32_MAX - 1000, 4000));
+  assert(!announcement_timeout_elapsed(8998, UINT32_MAX - 1000, 10000));
+  assert(announcement_timeout_elapsed(8999, UINT32_MAX - 1000, 10000));
+}
+
 static void test_announcement_text_encoding() {
   assert(json_escape_string("a\"b\\c\n\t\r") == "\"a\\\"b\\\\c\\n\\t\\r\"");
   assert(json_escape_string(std::string(1, '\x01')) == "\"\\u0001\"");
@@ -283,6 +298,7 @@ int main() {
   test_message_types();
   test_announcement_protocol();
   test_announcement_reservation();
+  test_announcement_timeout_elapsed();
   test_announcement_text_encoding();
   test_text_bounds_and_out_of_order();
   test_tail_starvation();

@@ -291,6 +291,11 @@ inline const char *announcement_busy_reason(bool connected, bool session, bool f
   return nullptr;
 }
 
+inline bool announcement_timeout_elapsed(uint32_t now_ms, uint32_t since_ms,
+                                         uint32_t timeout_ms) {
+  return static_cast<int32_t>(now_ms - since_ms) >= static_cast<int32_t>(timeout_ms);
+}
+
 // esp_websocket_client reports offsets within a frame, not within a whole
 // fragmented message. A continuation starts a new frame at offset zero.
 class WsTextAssembler {

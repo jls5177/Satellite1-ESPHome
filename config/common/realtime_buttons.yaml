@@ -77,7 +77,6 @@ binary_sensor:
           condition:
             binary_sensor.is_off: btn_left
           then:
-            - lambda: id(va).set_wake_in_progress(true);
             - script.execute:
                 id: play_sound
                 priority: false
@@ -169,6 +168,7 @@ binary_sensor:
                                                       - switch.is_off: master_mute_switch
                                                       - lambda: return id(va).is_connected();
                                                   then:
+                                                    - lambda: id(va).set_wake_in_progress(true);
                                                     - script.execute:
                                                         id: play_sound
                                                         priority: true

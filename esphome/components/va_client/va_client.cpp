@@ -205,22 +205,41 @@ void VaClient::setup() {
 }
 
 void VaClient::loop() {
-  const uint32_t timer_now = millis();
-  if (this->announcement_chime_pending_.exchange(false)) {
-    portENTER_CRITICAL(&this->announcement_mux_);
-    const auto reservation = this->announcement_;
-    portEXIT_CRITICAL(&this->announcement_mux_);
-    if (reservation.state() == AnnouncementReservation::State::RESERVED) {
+  portENTER_CRITICAL(&this->announcement_mux_);
+  const auto chime_reservation = this->announcement_;
+  const bool chime_pending = chime_reservation.state() == AnnouncementReservation::State::RESERVED &&
+                             this->announcement_chime_pending_.exchange(false);
+  portEXIT_CRITICAL(&this->announcement_mux_);
+  if (chime_pending) {
+    if (this->announcement_request_triggers_.empty())
+      this->announce_ready(std::string(chime_reservation.id()));
+    else if (this->announcement_id() == chime_reservation.id())
       for (auto *t : this->announcement_request_triggers_)
         t->trigger();
-    }
   }
   portENTER_CRITICAL(&this->announcement_mux_);
   const auto reservation = this->announcement_;
+  const uint32_t reserved_ms = this->announcement_reserved_ms_;
+  const uint32_t ready_ms = this->announcement_ready_ms_;
+  const uint32_t pcm_ms = this->announcement_pcm_ms_;
   portEXIT_CRITICAL(&this->announcement_mux_);
-  if (reservation.state() == AnnouncementReservation::State::READY &&
-      timer_now - this->announcement_ready_ms_.load() >= 10000u) {
-    if (this->cancel_announcement_("timeout", true, true))
+  const uint32_t timer_now = millis();
+  if (reservation.state() == AnnouncementReservation::State::RESERVED &&
+      announcement_timeout_elapsed(timer_now, reserved_ms, 4000u)) {
+    this->cancel_announcement_("timeout", true, false, reservation.id(),
+                               reservation.state(), reserved_ms);
+  } else if (reservation.state() == AnnouncementReservation::State::READY &&
+             announcement_timeout_elapsed(timer_now, ready_ms, 10000u)) {
+    if (this->cancel_announcement_("timeout", true, true, reservation.id(),
+                                   reservation.state(), ready_ms))
+      this->set_phase_("idle");
+  } else if (reservation.state() == AnnouncementReservation::State::PLAYING &&
+             announcement_timeout_elapsed(timer_now, pcm_ms, 10000u) &&
+             this->audio_fill_snapshot_() == 0 && this->speaker_ != nullptr &&
+             !this->speaker_->has_buffered_data() &&
+             this->playback_clock_.remaining_us(esp_timer_get_time()) == 0) {
+    if (this->cancel_announcement_("timeout", true, false, reservation.id(),
+                                   reservation.state(), pcm_ms))
       this->set_phase_("idle");
   }
   for (const auto &finished : this->timers_.expire(timer_now)) {
@@ -834,7 +853,7 @@ void VaClient::reset_connection_state_() {
   ++this->pcm_flush_epoch_;
   portEXIT_CRITICAL(&this->ring_mux_);
   this->followup_pending_ = false;
-  this->followup_open_waiting_ = false;
+  this->followup_window_active_ = false;
   this->request_follow_up_pending_ = false;
   this->followup_armed_ = false;
   this->waiting_for_speaker_stop_ = false;
@@ -1066,12 +1085,16 @@ void VaClient::handle_text_(const char *data, size_t len) {
         this->ws_connected_ && !this->control_channel_dirty_,
         this->streaming_ || this->session_starting_ || this->wake_in_progress_,
         this->followup_pending_ || this->followup_armed_ ||
-            this->followup_open_waiting_ || this->waiting_for_speaker_stop_,
+            this->followup_window_active_ || this->waiting_for_speaker_stop_,
         this->timer_ringing_, this->announcement_.active(),
         static_cast<Phase>(this->current_phase_.load()) == Phase::IDLE,
         this->media_muted_);
     const bool reserved = reason == nullptr &&
                           this->announcement_.reserve(request.id, request.follow_up);
+    if (reserved) {
+      this->announcement_reserved_ms_ = millis();
+      this->announcement_chime_pending_ = request.chime;
+    }
     const auto accepted = this->announcement_;
     portEXIT_CRITICAL(&this->announcement_mux_);
     if (!reserved) {
@@ -1084,9 +1107,7 @@ void VaClient::handle_text_(const char *data, size_t len) {
     this->suppress_followup_ = false;
     this->turn_t_first_audio_out_ = 0;
     this->streaming_ = false;
-    if (request.chime)
-      this->announcement_chime_pending_ = true;
-    else
+    if (!request.chime)
       this->announce_ready(request.id);
     return;
   }
@@ -1111,6 +1132,7 @@ void VaClient::handle_text_(const char *data, size_t len) {
 
   if (type == WsMessageType::ERROR) {
     ESP_LOGW(TAG, "Server reported error: %s", msg.c_str());
+    this->cancel_announcement_("error");
     this->streaming_ = false;
     this->session_starting_ = false;
     this->clear_mic_tx_();
@@ -1285,18 +1307,35 @@ void VaClient::log_announcement_(const AnnouncementReservation &reservation) {
            (int) reservation.id().size(), reservation.id().data());
 }
 
-bool VaClient::cancel_announcement_(const char *reason, bool notify, bool require_ready) {
+bool VaClient::cancel_announcement_(const char *reason, bool notify, bool require_ready,
+                                    std::string_view expected_id,
+                                    AnnouncementReservation::State expected_state,
+                                    uint32_t expected_stamp_ms) {
   portENTER_CRITICAL(&this->announcement_mux_);
   const auto old = this->announcement_;
-  const bool cancelled = old.active() &&
+  bool matches_expected = expected_state == AnnouncementReservation::State::IDLE;
+  if (old.state() == expected_state) {
+    uint32_t stamp = 0;
+    if (expected_state == AnnouncementReservation::State::RESERVED)
+      stamp = this->announcement_reserved_ms_;
+    else if (expected_state == AnnouncementReservation::State::READY)
+      stamp = this->announcement_ready_ms_;
+    else if (expected_state == AnnouncementReservation::State::PLAYING)
+      stamp = this->announcement_pcm_ms_;
+    matches_expected = stamp == expected_stamp_ms;
+  }
+  const bool cancelled = old.active() && (expected_id.empty() || old.id() == expected_id) &&
+      matches_expected &&
       (!require_ready || old.state() == AnnouncementReservation::State::READY) &&
       this->announcement_.cancel(old.id());
   if (cancelled) this->suppress_incoming_audio_ = true;
   const auto result = this->announcement_;
-  if (cancelled) this->announcement_.reset();
+  if (cancelled) {
+    this->announcement_chime_pending_ = false;
+    this->announcement_.reset();
+  }
   portEXIT_CRITICAL(&this->announcement_mux_);
   if (!cancelled) return false;
-  this->announcement_chime_pending_ = false;
   this->log_announcement_(result);
   this->streaming_ = false;
   this->playback_priming_ = false;
@@ -1337,6 +1376,7 @@ void VaClient::announce_ready(const std::string &id) {
   const auto reservation = this->announcement_;
   if (ready) {
     this->announcement_ready_ms_ = millis();
+    this->announcement_pcm_ms_ = this->announcement_ready_ms_.load();
     this->drop_until_next_turn_ = false;
     this->barge_in_trim_pending_ = false;
     this->suppress_incoming_audio_ = false;
@@ -1535,9 +1575,11 @@ void VaClient::handle_binary_(const uint8_t *data, size_t len) {
   portEXIT_CRITICAL(&this->ring_mux_);
   if (announcement.admits_pcm()) {
     portENTER_CRITICAL(&this->announcement_mux_);
-    const bool started = this->announcement_.state() == AnnouncementReservation::State::READY &&
-                         this->announcement_.id() == announcement.id() &&
-                         this->announcement_.playing();
+    const bool matched = this->announcement_.id() == announcement.id() &&
+                         this->announcement_.admits_pcm();
+    const bool started = matched && this->announcement_.state() == AnnouncementReservation::State::READY;
+    if (matched && this->announcement_.playing())
+      this->announcement_pcm_ms_ = millis();
     const auto playing = this->announcement_;
     portEXIT_CRITICAL(&this->announcement_mux_);
     if (started) this->log_announcement_(playing);
@@ -1777,6 +1819,8 @@ void VaClient::set_phase_(const std::string &phase) {
     // Server heard us — watchdog no longer needed.
     this->cancel_timeout("va_no_speech");
     this->cancel_timeout("va_followup");
+    this->cancel_timeout("va_followup_open");
+    this->followup_window_active_ = false;
   } else if (phase == "thinking" || phase == "replying") {
     if (phase == "thinking")
       this->prime_armed_ = true;
@@ -1830,7 +1874,7 @@ void VaClient::set_phase_(const std::string &phase) {
     }
     this->cancel_timeout("va_followup");
     this->cancel_timeout("va_followup_open");
-    this->followup_open_waiting_ = false;
+    this->followup_window_active_ = false;
     this->cancel_timeout("va_tts_tail");
     this->cancel_timeout("va_no_speech");
     this->followup_pending_ = false;
@@ -2074,6 +2118,7 @@ void VaClient::start_session() {
   this->post_stop_guard_ = false;
   this->cancel_timeout("va_followup");
   this->cancel_timeout("va_followup_open");
+  this->followup_window_active_ = false;
   this->cancel_timeout("va_tts_tail");
   // Anchor turn-latency timestamps for the new turn.
   this->turn_t_wake_ = millis();
@@ -2162,6 +2207,7 @@ void VaClient::open_followup_window_(uint32_t duration_ms) {
     // set_phase_ tail.)
     this->streaming_ = false;
     this->clear_mic_tx_();
+    this->followup_window_active_ = false;
     return;
   }
   // Follow-up dialog window. We do NOT open the mic immediately: has_buffered_
@@ -2177,9 +2223,10 @@ void VaClient::open_followup_window_(uint32_t duration_ms) {
   const uint32_t open_delay = this->followup_open_delay_ms_;
   ESP_LOGI(TAG, "follow-up: mic opens in %u ms, then listening for %u ms",
            (unsigned) open_delay, (unsigned) duration_ms);
+  this->followup_window_active_ = true;
   this->set_timeout("va_followup_open", open_delay, [this, duration_ms]() {
-    this->followup_open_waiting_ = false;
     if (!this->ws_connected_) {
+      this->followup_window_active_ = false;
       // The reply drained into a dead connection (WS dropped mid-reply).
       // Opening the mic would show a "listening" LED while on_mic_data_
       // drops every frame — a window the user talks into for nothing.
@@ -2191,6 +2238,7 @@ void VaClient::open_followup_window_(uint32_t duration_ms) {
     this->streaming_ = true;
     this->fire_phase_led_("listening");  // blue ring: user may answer now
     this->set_timeout("va_followup", duration_ms, [this]() {
+      this->followup_window_active_ = false;
       if (this->streaming_) {
         ESP_LOGI(TAG, "follow-up window expired — mic streaming off");
         this->streaming_ = false;
@@ -2199,7 +2247,6 @@ void VaClient::open_followup_window_(uint32_t duration_ms) {
         this->fire_phase_led_("idle");  // no answer came; back to idle
       }
     });
-    this->followup_open_waiting_ = true;
   });
 }
 
@@ -2270,7 +2317,9 @@ void VaClient::commit_followup_mic() {
   this->preroll_discard_pending_ = true;
   this->clear_mic_tx_();
   this->streaming_ = true;
+  this->followup_window_active_ = true;
   this->set_timeout("va_followup", kRequestFollowUpMs, [this]() {
+    this->followup_window_active_ = false;
     if (this->streaming_) {
       ESP_LOGI(TAG, "follow-up window expired — mic streaming off");
       this->streaming_ = false;
@@ -2335,6 +2384,7 @@ void VaClient::send_interrupt() {
   this->idle_emit_pending_ = false;
   this->cancel_timeout("va_no_speech");
   this->cancel_timeout("va_followup");
+  this->followup_window_active_ = false;
   this->cancel_timeout("va_tts_tail");
   // The phase=idle the server is about to send shouldn't open a follow-up
   // mic window — the user said "stop", not "wait for me to keep talking".
@@ -2345,7 +2395,7 @@ void VaClient::send_interrupt() {
   // Cleared in start_session() (the next wake). See set_phase_.
   this->post_stop_guard_ = true;
   this->cancel_timeout("va_followup_open");
-  this->followup_open_waiting_ = false;
+  this->followup_window_active_ = false;
   ESP_LOGI(TAG, "send_interrupt — WS msg sent, queue flushed");
 }
 

@@ -195,7 +195,10 @@ class VaClient : public Component {
   // independently of a server-sent phase).
   void fire_phase_led_(const std::string &phase);
   void open_followup_window_(uint32_t duration_ms);
-  bool cancel_announcement_(const char *reason, bool notify = true, bool require_ready = false);
+  bool cancel_announcement_(const char *reason, bool notify = true, bool require_ready = false,
+                            std::string_view expected_id = {},
+                            AnnouncementReservation::State expected_state = AnnouncementReservation::State::IDLE,
+                            uint32_t expected_stamp_ms = 0);
   void finish_announcement_();
   static const char *announcement_state_name_(AnnouncementReservation::State state);
   void log_announcement_(const AnnouncementReservation &reservation);
@@ -205,8 +208,10 @@ class VaClient : public Component {
   mutable portMUX_TYPE announcement_mux_ = portMUX_INITIALIZER_UNLOCKED;
   AnnouncementReservation announcement_;
   std::atomic<bool> announcement_chime_pending_{false};
+  uint32_t announcement_reserved_ms_{0};  // protected by announcement_mux_
   std::atomic<uint32_t> announcement_ready_ms_{0};
-  std::atomic<bool> followup_open_waiting_{false};
+  std::atomic<uint32_t> announcement_pcm_ms_{0};
+  std::atomic<bool> followup_window_active_{false};
   std::atomic<bool> timer_ringing_{false};
   std::atomic<bool> wake_in_progress_{false};
   std::atomic<bool> media_muted_{false};
