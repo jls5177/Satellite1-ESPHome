@@ -89,11 +89,13 @@ source scripts/setup_build_env.sh
 esphome compile config/satellite1.realtime.yaml
 ```
 
-Alternatively, build in Docker (for example, on macOS):
+Alternatively, build in Docker (for example, on macOS). The helper stamps the
+firmware version from `git describe`, so Home Assistant's device page shows
+which build a satellite runs (e.g. `Firmware: v0.1.5-147-g808c0c9 (ESPHome 2026.8.1)`,
+with `-dirty` for uncommitted changes) instead of `dev`:
 
 ```sh
-docker run --rm -v "$PWD":/config -w /config \
-  ghcr.io/esphome/esphome:2026.8.1 compile config/satellite1.realtime.yaml
+scripts/esphome-docker.sh compile config/satellite1.realtime.yaml
 ```
 
 **Which flash method?** A Satellite1 already running stock FPH firmware
@@ -106,9 +108,7 @@ bricked device.
 **OTA from a Docker build on the LAN** (replace the IP with the device's):
 
 ```sh
-docker run --rm -v "$PWD":/config -w /config \
-  ghcr.io/esphome/esphome:2026.8.1 upload config/satellite1.realtime.yaml \
-  --device 192.168.1.50
+scripts/esphome-docker.sh upload config/satellite1.realtime.yaml --device 192.168.1.50
 ```
 
 **USB (blank or bricked devices):** open [web.esphome.io](https://web.esphome.io/)
