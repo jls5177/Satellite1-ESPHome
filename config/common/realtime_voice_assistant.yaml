@@ -235,8 +235,7 @@ micro_wake_word:
           and:
             - switch.is_off: master_mute_switch
             - lambda: |-
-                return !id(va).dnd() || wake_word == "Stop" || wake_word == "stop" ||
-                       id(timer_ringing).state;
+                return !id(va).dnd() || wake_word == "Stop" || wake_word == "stop";
         then:
           - if:
               condition:

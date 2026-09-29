@@ -584,7 +584,8 @@ script:
     then:
       - light.turn_on:
           id: voice_assistant_leds
-          brightness: 3%
+          # Gamma 2.8 rounds anything below ~11% to off; 20% is the lowest visible.
+          brightness: 20%
           effect: "Do Not Disturb"
 
   # Script executed when the voice assistant is waiting for a command (After the wake word)
