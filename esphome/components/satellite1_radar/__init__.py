@@ -3,7 +3,7 @@ from pathlib import Path
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import mdns, socket, uart
+from esphome.components import esp32, mdns, socket, uart
 from esphome.const import CONF_ESPHOME, CONF_ID, Framework
 from esphome.core.entity_helpers import (
     register_device_class,
@@ -72,6 +72,8 @@ def _final_validate(config):
 FINAL_VALIDATE_SCHEMA = _final_validate
 
 async def to_code(config):
+    # radar_tuner_server uses ESP-IDF's cJSON, which ESPHome 2026.9+ excludes by default.
+    esp32.include_builtin_idf_component("json")
     device_class_indices = {
         "distance": register_device_class("distance"),
         "illuminance": register_device_class("illuminance"),
