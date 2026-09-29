@@ -49,6 +49,12 @@ light:
         to: 23
     effects:
       - addressable_lambda:
+          name: "Do Not Disturb"
+          update_interval: 100ms
+          lambda: |-
+            it.all() = Color::BLACK;
+            it[0] = Color(255, 0, 0);
+      - addressable_lambda:
           name: "Rotating Blob"
           update_interval: 50ms
           lambda: |-
@@ -509,7 +515,10 @@ script:
           } else if (id(external_media_player).volume == 0.0f || id(external_media_player).is_muted()) {
             id(control_leds_muted_or_silent).execute();
           } else if (id(voice_assistant_phase) == ${voice_assist_idle_phase_id}) {
-            id(control_leds_voice_assistant_idle_phase).execute();
+            if (id(va).dnd())
+              id(control_leds_dnd_idle_phase).execute();
+            else
+              id(control_leds_voice_assistant_idle_phase).execute();
           }
 
   # Script executed during Improv BLE
@@ -570,6 +579,13 @@ script:
             light.is_on: led_ring
           then:
             light.turn_on: led_ring
+
+  - id: control_leds_dnd_idle_phase
+    then:
+      - light.turn_on:
+          id: voice_assistant_leds
+          brightness: 3%
+          effect: "Do Not Disturb"
 
   # Script executed when the voice assistant is waiting for a command (After the wake word)
   # Slow clockwise spin of the LED ring.

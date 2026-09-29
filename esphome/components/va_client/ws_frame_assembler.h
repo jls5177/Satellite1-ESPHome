@@ -233,6 +233,20 @@ inline std::string_view truncate_utf8(std::string_view text, size_t max_chars) {
   return text.substr(0, pos);
 }
 
+inline std::string start_json(std::string_view mac, std::string_view name,
+                              std::string_view token, bool dnd) {
+  std::string message = "{\"type\":\"start\",\"mac\":" + json_escape_string(mac) +
+                        ",\"name\":" + json_escape_string(truncate_utf8(name, 64)) +
+                        ",\"caps\":[\"announce\"],\"dnd\":" + (dnd ? "true" : "false");
+  if (!token.empty())
+    message += ",\"token\":" + json_escape_string(token);
+  return message + "}";
+}
+
+inline std::string dnd_json(bool dnd) {
+  return dnd ? "{\"type\":\"dnd\",\"value\":true}" : "{\"type\":\"dnd\",\"value\":false}";
+}
+
 class AnnouncementReservation {
  public:
   enum class State : uint8_t { IDLE, RESERVED, READY, PLAYING, DONE, CANCELLED };
@@ -279,9 +293,10 @@ class AnnouncementReservation {
   bool follow_up_{false};
 };
 
-inline const char *announcement_busy_reason(bool connected, bool session, bool followup,
+inline const char *announcement_busy_reason(bool dnd, bool connected, bool session, bool followup,
                                             bool timer, bool reserved, bool phase_idle,
                                             bool muted) {
+  if (dnd) return "dnd";
   if (reserved) return "reserved";
   if (!connected || session) return "session";
   if (followup) return "followup";

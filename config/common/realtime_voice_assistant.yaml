@@ -232,7 +232,11 @@ micro_wake_word:
   on_wake_word_detected:
     - if:
         condition:
-          switch.is_off: master_mute_switch
+          and:
+            - switch.is_off: master_mute_switch
+            - lambda: |-
+                return !id(va).dnd() || wake_word == "Stop" || wake_word == "stop" ||
+                       id(timer_ringing).state;
         then:
           - if:
               condition:
@@ -311,6 +315,14 @@ micro_wake_word:
                                 id: play_sound
                                 priority: true
                                 sound_file: "factory_reset_cancelled_sound"
+        else:
+          - if:
+              condition:
+                lambda: |-
+                  return id(va).dnd() && !id(master_mute_switch).state &&
+                         wake_word != "Stop" && wake_word != "stop";
+              then:
+                - lambda: 'ESP_LOGD("va_client", "wake ignored: do not disturb");'
 
 number:
   - platform: template
@@ -366,6 +378,37 @@ switch:
       - lambda: id(va).set_barge_in(true);
     on_turn_off:
       - lambda: id(va).set_barge_in(false);
+  - platform: template
+    id: dnd_switch
+    name: "Do Not Disturb"
+    icon: mdi:minus-circle
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - lambda: id(va).set_dnd(true);
+      - if:
+          condition:
+            switch.is_on: timer_ringing
+          then:
+            - script.execute: disable_timer_repeat
+            - if:
+                condition:
+                  and:
+                    - media_player.is_announcing: external_media_player
+                    - lambda: return !id(va).announcement_active();
+                then:
+                  - media_player.stop:
+                      id: external_media_player
+                      announcement: true
+      - script.execute: control_leds
+    on_turn_off:
+      - lambda: id(va).set_dnd(false);
+      - if:
+          condition:
+            switch.is_on: timer_ringing
+          then:
+            - script.execute: ring_timer
+      - script.execute: control_leds
 script:
   - id: announcement_chime
     mode: restart
@@ -535,6 +578,7 @@ interval:
             - script.execute: control_leds
             - script.execute: apply_assistant_voice_level
             - lambda: id(va).set_barge_in(id(hands_free_interrupt).state);
+            - lambda: id(va).set_dnd(id(dnd_switch).state);
             - lambda: id(va).set_barge_in_holdoff_ms(id(barge_in_holdoff).state);
       - if:
           condition:

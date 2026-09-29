@@ -25,6 +25,8 @@ using esphome::va_client::json_escape_string;
 using esphome::va_client::truncate_utf8;
 using esphome::va_client::announcement_busy_reason;
 using esphome::va_client::announcement_timeout_elapsed;
+using esphome::va_client::start_json;
+using esphome::va_client::dnd_json;
 
 static void test_scale_sample_negative() {
   const size_t num = 238, den = 239;  // size_t operands, as in the ring fades
@@ -196,14 +198,29 @@ static void test_announcement_reservation() {
   assert(r.state() == State::CANCELLED && !r.active());
   r.reset();
   assert(r.state() == State::IDLE && r.id().empty());
-  assert(announcement_busy_reason(true, false, false, false, false, true, false) == nullptr);
-  assert(std::string(announcement_busy_reason(true, true, false, false, false, true, false)) == "session");
-  assert(std::string(announcement_busy_reason(true, false, true, false, false, true, false)) == "followup");
-  assert(std::string(announcement_busy_reason(true, false, false, true, false, true, false)) == "timer");
-  assert(std::string(announcement_busy_reason(true, false, false, false, true, true, false)) == "reserved");
-  assert(std::string(announcement_busy_reason(true, false, false, false, false, false, false)) == "phase");
-  assert(std::string(announcement_busy_reason(true, false, false, false, false, true, true)) == "muted");
-  assert(std::string(announcement_busy_reason(false, false, false, false, false, true, false)) == "session");
+  assert(announcement_busy_reason(false, true, false, false, false, false, true, false) == nullptr);
+  assert(std::string(announcement_busy_reason(false, true, true, false, false, false, true, false)) == "session");
+  assert(std::string(announcement_busy_reason(false, true, false, true, false, false, true, false)) == "followup");
+  assert(std::string(announcement_busy_reason(false, true, false, false, true, false, true, false)) == "timer");
+  assert(std::string(announcement_busy_reason(false, true, false, false, false, true, true, false)) == "reserved");
+  assert(std::string(announcement_busy_reason(false, true, false, false, false, false, false, false)) == "phase");
+  assert(std::string(announcement_busy_reason(false, true, false, false, false, false, true, true)) == "muted");
+  assert(std::string(announcement_busy_reason(false, false, false, false, false, false, true, false)) == "session");
+  assert(std::string(announcement_busy_reason(true, false, true, true, true, true, false, true)) == "dnd");
+  assert(std::string(announcement_busy_reason(true, true, false, false, false, true, true, false)) == "dnd");
+}
+
+static void test_dnd_messages() {
+  assert(start_json("aa:bb:cc:dd:ee:ff", "office", "", false) ==
+         "{\"type\":\"start\",\"mac\":\"aa:bb:cc:dd:ee:ff\",\"name\":\"office\","
+         "\"caps\":[\"announce\"],\"dnd\":false}");
+  assert(start_json("aa:bb:cc:dd:ee:ff", "a\"b", "t\\k", true) ==
+         "{\"type\":\"start\",\"mac\":\"aa:bb:cc:dd:ee:ff\",\"name\":\"a\\\"b\","
+         "\"caps\":[\"announce\"],\"dnd\":true,\"token\":\"t\\\\k\"}");
+  assert(start_json("mac", std::string(65, 'a'), "", true).find(std::string(65, 'a')) ==
+         std::string::npos);
+  assert(dnd_json(true) == "{\"type\":\"dnd\",\"value\":true}");
+  assert(dnd_json(false) == "{\"type\":\"dnd\",\"value\":false}");
 }
 
 static void test_announcement_timeout_elapsed() {
@@ -298,6 +315,7 @@ int main() {
   test_message_types();
   test_announcement_protocol();
   test_announcement_reservation();
+  test_dnd_messages();
   test_announcement_timeout_elapsed();
   test_announcement_text_encoding();
   test_text_bounds_and_out_of_order();

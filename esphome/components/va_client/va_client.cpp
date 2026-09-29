@@ -101,6 +101,11 @@ void VaClient::set_barge_in_holdoff_ms(uint32_t ms) {
   this->barge_in_holdoff_ms_ = std::min(ms, uint32_t{2000});
 }
 
+void VaClient::set_dnd(bool enabled) {
+  if (this->dnd_.exchange(enabled) != enabled && this->ws_connected_)
+    this->dnd_update_pending_ = true;
+}
+
 bool VaClient::barge_in_mic_allowed_(uint32_t now_ms) const {
   return barge_in_mic_allowed(static_cast<Phase>(this->current_phase_.load()) == Phase::REPLYING,
                               this->effective_barge_in_(), this->reply_playback_started_ms_.load(),
@@ -205,6 +210,10 @@ void VaClient::setup() {
 }
 
 void VaClient::loop() {
+  if (this->ws_connected_ && this->dnd_update_pending_.exchange(false)) {
+    const std::string message = dnd_json(this->dnd());
+    this->send_control_(message.c_str(), message.size(), "dnd");
+  }
   portENTER_CRITICAL(&this->announcement_mux_);
   const auto chime_reservation = this->announcement_;
   const bool chime_pending = chime_reservation.state() == AnnouncementReservation::State::RESERVED &&
@@ -834,6 +843,7 @@ void VaClient::schedule_reconnect_() {
 void VaClient::reset_connection_state_() {
   this->cancel_announcement_("disconnect", false);
   this->ws_connected_ = false;
+  this->dnd_update_pending_ = false;
   this->server_barge_in_ = false;
   this->server_hello_received_ = false;
   this->server_barge_warning_logged_ = false;
@@ -934,12 +944,8 @@ void VaClient::on_ws_event(int32_t event_id, void *event_data) {
       std::string mac = get_mac_address_pretty();
       std::transform(mac.begin(), mac.end(), mac.begin(),
                      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-      std::string start_msg = "{\"type\":\"start\",\"mac\":" + json_escape_string(mac) +
-                              ",\"name\":" + json_escape_string(truncate_utf8(App.get_name().c_str(), 64)) +
-                              ",\"caps\":[\"announce\"]";
-      if (!this->token_.empty())
-        start_msg += ",\"token\":" + json_escape_string(this->token_);
-      start_msg += "}";
+      const bool announced_dnd = this->dnd();
+      std::string start_msg = start_json(mac, App.get_name().c_str(), this->token_, announced_dnd);
       auto handle = static_cast<esp_websocket_client_handle_t>(this->ws_handle_);
       if (!this->send_control_(start_msg.c_str(), start_msg.size(), "start marker", true))
         break;
@@ -950,6 +956,8 @@ void VaClient::on_ws_event(int32_t event_id, void *event_data) {
       this->control_channel_dirty_ = false;
       ++this->connection_epoch_;
       this->ws_connected_ = true;
+      if (this->dnd() != announced_dnd)
+        this->dnd_update_pending_ = true;
       const uint32_t timer_epoch = this->connection_epoch_.load();
       this->defer([this, timer_epoch]() {
         if (this->connection_epoch_.load() == timer_epoch && this->ws_connected_)
@@ -1082,6 +1090,7 @@ void VaClient::handle_text_(const char *data, size_t len) {
     }
     portENTER_CRITICAL(&this->announcement_mux_);
     const char *reason = announcement_busy_reason(
+        this->dnd(),
         this->ws_connected_ && !this->control_channel_dirty_,
         this->streaming_ || this->session_starting_ || this->wake_in_progress_,
         this->followup_pending_ || this->followup_armed_ ||

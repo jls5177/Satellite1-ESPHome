@@ -17,7 +17,11 @@ switch:
       - micro_wake_word.enable_model: stop
       - lambda: id(stop).set_probability_cutoff(102);
       - script.execute: reconcile_ducking
-      - script.execute: ring_timer
+      - if:
+          condition:
+            lambda: return !id(va).dnd();
+          then:
+            - script.execute: ring_timer
       - script.execute: control_leds
       - script.execute: timer_ring_watchdog
     on_turn_off:
@@ -27,8 +31,10 @@ switch:
       - script.execute: disable_timer_repeat
       - if:
           condition:
-            media_player.is_announcing:
-              id: external_media_player
+            and:
+              - media_player.is_announcing:
+                  id: external_media_player
+              - lambda: return !id(va).announcement_active();
           then:
             - media_player.stop:
                 id: external_media_player
@@ -51,11 +57,15 @@ switch:
 script:
   - id: ring_timer
     then:
-      - script.execute: enable_timer_repeat
-      - script.execute:
-          id: play_sound
-          priority: true
-          sound_file: "timer_finished_sound"
+      - if:
+          condition:
+            lambda: return !id(va).dnd();
+          then:
+            - script.execute: enable_timer_repeat
+            - script.execute:
+                id: play_sound
+                priority: true
+                sound_file: "timer_finished_sound"
 
   - id: enable_timer_repeat
     then:

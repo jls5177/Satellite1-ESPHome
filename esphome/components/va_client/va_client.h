@@ -68,6 +68,8 @@ class VaClient : public Component {
   void set_volume(float v) { volume_ = v; }
   void set_media_muted(bool muted) { media_muted_ = muted; }
   void set_timer_ringing(bool ringing);
+  void set_dnd(bool enabled);
+  bool dnd() const { return dnd_.load(); }
   void set_wake_in_progress(bool waking) { wake_in_progress_ = waking; }
   bool announcement_active() const {
     portENTER_CRITICAL(&announcement_mux_);
@@ -213,6 +215,8 @@ class VaClient : public Component {
   std::atomic<uint32_t> announcement_pcm_ms_{0};
   std::atomic<bool> followup_window_active_{false};
   std::atomic<bool> timer_ringing_{false};
+  std::atomic<bool> dnd_{false};
+  std::atomic<bool> dnd_update_pending_{false};
   std::atomic<bool> wake_in_progress_{false};
   std::atomic<bool> media_muted_{false};
   std::atomic<uint8_t> mic_channel_{0};

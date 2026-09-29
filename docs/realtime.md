@@ -180,6 +180,7 @@ Useful Home Assistant controls from this firmware:
 | Entity name | Purpose |
 | --- | --- |
 | **Hands-free interrupt** | Lets speech interrupt a reply; off by default. Requires the add-on option below too. |
+| **Do Not Disturb** | Per-device switch that suppresses wake-word sessions, new announcements, and timer ringing sound. |
 | **Barge-in holdoff** | Mic-transmit pause after reply playback starts (0–2000 ms; default 400 ms). |
 | **Assistant voice level** | Assistant-only output level (0.3–1.0, default 1.0). |
 | **Mute Microphones** | Software mic mute; hardware mute takes precedence. Muting stops the current assistant session and closes follow-up listening. |
@@ -243,6 +244,33 @@ from the wake and timer sounds. Music stays ducked from reservation through
 speaker drain; a follow-up window opens only when the announcement requests it.
 If the add-on's ordinary follow-up duration is disabled, an explicitly
 requested announcement follow-up uses the existing 10-second request window.
+
+### Do Not Disturb
+
+Turn on the Satellite1 **Do Not Disturb** switch to ignore wake words, hold new
+announcements, and silence timer ringing. Timers still finish, show their LED
+indication, respond to the stop word or center button, and auto-stop after
+15 minutes. The center button can still start a voice session; the stop word
+still interrupts replies. An announcement already reserved or playing finishes
+normally. A dim red LED marks idle DND; active, muted, timer, and error LED
+states take precedence. The switch restores its last state after reboot.
+
+The compatible add-on holds announcements for this satellite while DND is on
+(up to 10 minutes, at most five), while other satellites announce normally.
+When DND ends, the add-on plays one AI catch-up summary of held announcements
+on this device. For example, replace these entity IDs with your own meeting
+sensor and satellite switch:
+
+```yaml
+alias: Office satellite Do Not Disturb during meetings
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.office_in_meeting
+actions:
+  - action: "switch.turn_{{ 'on' if trigger.to_state.state == 'on' else 'off' }}"
+    target:
+      entity_id: switch.office_satellite_do_not_disturb
+```
 
 ## Troubleshooting
 
